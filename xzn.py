@@ -18,6 +18,7 @@ Xenon Zones (XZN) v4.6
 - Export playlist as .m3u / import .m3u and .m3u8
 - v4.6: macOS-compatible buttons (Label-based on darwin)
 - v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
+- v4.6: All windows (EQ, Info, Theme) now use macOS-safe buttons
 
 Copyright (c) 2026 Xenon Zones
 
@@ -399,6 +400,38 @@ def load_background(w, h, palette, custom_path=None):
                 print(f"[XZN] Failed to load BG ({p}): {e}")
 
     return _make_gradient_bg(w, h, palette)
+
+
+def make_flat_button(parent, text, cmd, palette, width=None,
+                     bg=None, fg=None, font=None, padx=14, pady=4):
+    """
+    Cross-platform button that respects bg/fg on macOS too.
+
+    On macOS, tk.Button ignores bg/fg (Aqua theme), so we use a
+    tk.Label with click bindings instead. On Windows/Linux this
+    returns a normal tk.Button.
+    """
+    bg_color = bg if bg is not None else palette["RAISED"]
+    fg_color = fg if fg is not None else palette["WHITE"]
+    font_use = font if font is not None else FONT_UI_B
+
+    if IS_MAC:
+        lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                       font=font_use, padx=padx, pady=pady,
+                       relief="raised", bd=1, cursor="hand2")
+        lbl.bind("<Button-1>", lambda e: cmd())
+        lbl.bind("<Enter>", lambda e: lbl.config(bg=lighten(bg_color, 0.15)))
+        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+        return lbl
+    else:
+        kw = dict(text=text, command=cmd, bg=bg_color, fg=fg_color,
+                  activebackground=lighten(bg_color, 0.15),
+                  activeforeground=fg_color,
+                  relief="raised", bd=1, font=font_use,
+                  padx=padx, pady=pady, takefocus=0)
+        if width is not None:
+            kw["width"] = width
+        return tk.Button(parent, **kw)
 
 
 # ------------------------------------------------------------------------
@@ -1450,11 +1483,7 @@ class InfoWindow:
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
-        btn = tk.Button(frame, text="Close", command=self.win.destroy,
-                        bg=p["RAISED"], fg=p["WHITE"],
-                        activebackground=lighten(p["RAISED"], 0.15),
-                        activeforeground=p["WHITE"], relief="raised", bd=1,
-                        font=FONT_UI_B, padx=14, pady=4)
+        btn = make_flat_button(frame, "Close", self.win.destroy, palette=p)
         btn.pack(anchor="e")
 
         self.win.update_idletasks()
@@ -1510,14 +1539,10 @@ class ThemeWindow:
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(fill="x", pady=(14, 0))
 
-        tk.Button(btn_row, text="Default (Purple)",
-                  command=self._reset,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=4).pack(side="left")
-        tk.Button(btn_row, text="Close",
-                  command=self.win.destroy,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=4).pack(side="right")
+        make_flat_button(btn_row, "Default (Purple)", self._reset, palette=p,
+                         padx=10, pady=4).pack(side="left")
+        make_flat_button(btn_row, "Close", self.win.destroy, palette=p,
+                         padx=10, pady=4).pack(side="right")
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -1564,13 +1589,9 @@ class EqualizerWindow:
                  font=("Courier New", 11, "bold"),
                  bg=p["PANEL"], fg=p["ACCENT"]).pack(side="left")
 
-        self.btn_on = tk.Button(header, text="ON",
-                                command=self._toggle_on,
-                                bg=p["RAISED"], fg=p["WHITE"],
-                                activebackground=lighten(p["RAISED"], 0.15),
-                                activeforeground=p["WHITE"],
-                                relief="raised", bd=1,
-                                font=FONT_UI_B, width=4, takefocus=0)
+        self.btn_on = make_flat_button(header, "ON", self._toggle_on,
+                                       palette=p, width=4,
+                                       padx=6, pady=3)
         self.btn_on.pack(side="right")
 
         tk.Label(header, text="Preamp",
@@ -1631,12 +1652,10 @@ class EqualizerWindow:
 
         footer = tk.Frame(self.win, bg=p["PANEL"])
         footer.pack(fill="x", padx=10, pady=(0, 10))
-        tk.Button(footer, text="Reset", command=self._reset,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=3, takefocus=0).pack(side="left")
-        tk.Button(footer, text="Close", command=self.win.destroy,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=3, takefocus=0).pack(side="right")
+        make_flat_button(footer, "Reset", self._reset, palette=p,
+                         padx=10, pady=3).pack(side="left")
+        make_flat_button(footer, "Close", self.win.destroy, palette=p,
+                         padx=10, pady=3).pack(side="right")
 
         self._sync_on_button()
 
