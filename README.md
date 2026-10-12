@@ -3,7 +3,11 @@
 A classic media player with a cyberpunk look — video, audio,
 10-band EQ, playlists and more. Built in Python.
 
-![screenshot](screenshots/main.png)
+## Screenshots
+
+![Main window](main.png)
+
+![Equalizer and video](equalizer_video.png)
 
 ## Features
 
