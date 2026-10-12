@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon Zones (XZN) v4.5
+Xenon Zones (XZN) v4.6
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -16,6 +16,8 @@ Xenon Zones (XZN) v4.5
 - Extended Info window with tagline, credits and copyright
 - Auto-save playlist on every change (crash-safe)
 - Export playlist as .m3u / import .m3u and .m3u8
+- v4.6: macOS-compatible buttons (Label-based on darwin)
+- v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
 
 Copyright (c) 2026 Xenon Zones
 
@@ -46,6 +48,10 @@ if sys.platform == "win32":
 else:
     ctypes = None
 
+# --- Platform detection -------------------------------------------------
+IS_MAC = (sys.platform == "darwin")
+IS_WINDOWS = (sys.platform == "win32")
+
 # --- Optional: Drag & Drop ----------------------------------------------
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES  # type: ignore
@@ -66,7 +72,6 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
 # --- Icon constants -----------------------------------------------------
 ICON_FILENAME = "xzn.ico"
-# Unique app id so Windows groups windows/taskbar correctly
 TASKBAR_APP_ID = "com.katie.xzn.mediaplayer.1"
 
 # --- Default palette (dark bluish purple) -------------------------------
@@ -101,7 +106,6 @@ FONT_UI_B = ("Helvetica", 9, "bold")
 FONT_LCD  = ("Courier New", 13, "bold")
 FONT_LG   = ("Courier New", 16, "bold")
 FONT_BTN  = ("Courier New", 10, "bold")
-# Italic accent font for the tagline in the Info window
 FONT_TAGLINE = ("Helvetica", 11, "italic")
 
 MEDIA_EXTS = {
@@ -111,7 +115,6 @@ MEDIA_EXTS = {
     ".m4a", ".m4b", ".aiff", ".ape", ".alac",
 }
 
-# Playlist file extensions we can import
 PLAYLIST_EXTS = {".m3u", ".m3u8"}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -126,19 +129,13 @@ EQ_PRESETS = {
     "Jazz":      [4, 3, 1, 2, -1, -1, 0, 2, 3, 4],
     "Classical": [4, 3, 2, 0, 0, 0, -2, -3, -3, -4],
     "Bass":      [8, 7, 5, 2, 0, 0, 0, 0, 0, 0],
-    "Treble":    [0, 0, 0, 0, 0, 0, 2, 4, 6, 7, 8][:10],
+    "Treble":    [0, 0, 0, 0, 0, 2, 4, 6, 7, 8],
     "Vocal":     [-2, -1, 2, 4, 5, 4, 2, 0, -1, -2],
 }
-EQ_PRESETS["Treble"] = [0, 0, 0, 0, 0, 2, 4, 6, 7, 8]
 
 
 # ------------------------------------------------------------------------
 def resource_path(relative_name):
-    """
-    Return the absolute path to a resource – works both when running the
-    script directly and when frozen with PyInstaller (--onefile). With
-    --onefile PyInstaller extracts everything to sys._MEIPASS.
-    """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         base = sys._MEIPASS  # type: ignore[attr-defined]
     else:
@@ -147,17 +144,11 @@ def resource_path(relative_name):
 
 
 def get_icon_path():
-    """Return the path to the .ico file (packed or unpacked)."""
     p = resource_path(ICON_FILENAME)
     return p if os.path.isfile(p) else None
 
 
 def set_taskbar_app_id():
-    """
-    Set the Windows App User Model ID so windows and taskbar are
-    recognized as a standalone application (icon grouping).
-    Must be called BEFORE creating the first Tk window.
-    """
     if sys.platform != "win32" or ctypes is None:
         return
     try:
@@ -169,10 +160,6 @@ def set_taskbar_app_id():
 
 
 def apply_window_icon(window):
-    """
-    Set the window icon (title bar, taskbar) for any Tk window
-    (Tk or Toplevel). Works on Windows and Linux.
-    """
     icon_path = get_icon_path()
     if not icon_path:
         return
@@ -418,10 +405,6 @@ def load_background(w, h, palette, custom_path=None):
 # M3U parsing / writing helpers
 # ------------------------------------------------------------------------
 def write_m3u(path, playlist):
-    """
-    Write a playlist to an M3U file. Uses absolute paths, one per line.
-    Includes the standard '#EXTM3U' header.
-    """
     with open(path, "w", encoding="utf-8") as f:
         f.write("#EXTM3U\n")
         for p in playlist:
@@ -429,17 +412,6 @@ def write_m3u(path, playlist):
 
 
 def read_m3u(path):
-    """
-    Read an M3U / M3U8 file and return a list of absolute paths.
-
-    - Lines starting with '#' are treated as comments / directives
-      (#EXTINF etc.) and skipped.
-    - Blank lines are skipped.
-    - Relative paths are resolved against the M3U file's directory.
-    - Only files that actually exist are returned (with a small info
-      print for missing ones, so the user can investigate if needed).
-    - UTF-8 with BOM is handled automatically by using 'utf-8-sig'.
-    """
     base_dir = os.path.dirname(os.path.abspath(path))
     out = []
     missing = 0
@@ -451,7 +423,6 @@ def read_m3u(path):
                     continue
                 if line.startswith("#"):
                     continue
-                # Normalize both / and \ separators
                 p = line.replace("\\", os.sep).replace("/", os.sep)
                 if not os.path.isabs(p):
                     p = os.path.join(base_dir, p)
@@ -558,10 +529,6 @@ class VideoFrameBuffer:
 
 # ------------------------------------------------------------------------
 class Equalizer:
-    """
-    10-band graphic EQ with RBJ peaking biquads.
-    Processes stereo float32 blocks in-place.
-    """
     def __init__(self, sample_rate, bands):
         self.fs = float(sample_rate)
         self.bands = list(bands)
@@ -694,7 +661,6 @@ class Player(threading.Thread):
         self._clock_lock = threading.Lock()
         self._out_latency = 0.15
 
-        # Equalizer
         self.eq = Equalizer(SAMPLE_RATE, EQ_BANDS)
 
         self.stream = None
@@ -753,7 +719,6 @@ class Player(threading.Thread):
     def set_mute(self, m):
         self._mute = bool(m)
 
-    # --- EQ interface ----------------------------------------------------
     def set_eq_gains(self, gains_db):
         self.eq.set_gains(gains_db)
 
@@ -765,7 +730,6 @@ class Player(threading.Thread):
     def set_eq_preamp(self, db):
         self.eq.set_preamp(db)
 
-    # --------------------------------------------------------------------
     def position(self):
         if self.state == "playing":
             with self._clock_lock:
@@ -910,11 +874,6 @@ class Player(threading.Thread):
         return offset
 
     def _drain_ring(self, timeout=8.0, poll=0.02):
-        """
-        Wait until the audio ring buffer has been fully played out by the
-        audio callback. Prevents the last seconds of a track from being
-        truncated at end-of-file.
-        """
         t0 = time.monotonic()
         while not self._want_stop:
             if self.ring.available() == 0:
@@ -1440,10 +1399,6 @@ class VideoWindow:
 
 # ------------------------------------------------------------------------
 class InfoWindow:
-    """
-    Extended info/about window with title, taglines, credits and copyright.
-    The tagline is rendered in a slightly larger italic font.
-    """
     def __init__(self, master, palette):
         self.master = master
         self.win = tk.Toplevel(master)
@@ -1589,7 +1544,6 @@ class ThemeWindow:
 
 # ------------------------------------------------------------------------
 class EqualizerWindow:
-    """Winamp-style 10-band graphic EQ with presets, preamp and on/off."""
     def __init__(self, master, app):
         self.app = app
         self.master = master
@@ -1752,10 +1706,6 @@ class EqualizerWindow:
 
 # ------------------------------------------------------------------------
 class BgPopup:
-    """
-    Borderless custom popup menu for the BG button.
-    Replaces tk.Menu to avoid the native system frame (white border).
-    """
     def __init__(self, app, x, y):
         self.app = app
         self._destroyed = False
@@ -1956,7 +1906,6 @@ class App:
 
         self.root.after(80, self._initial_bg)
 
-    # --- Persistence -----------------------------------------------------
     def _persist_settings(self):
         try:
             alpha = int(self.alpha_scale.get())
@@ -1972,7 +1921,6 @@ class App:
             "eq_preamp": float(self._eq_preamp),
         })
 
-    # --- EQ interface ----------------------------------------------------
     def set_eq_enabled(self, en):
         self._eq_enabled = bool(en)
         self.player.set_eq_enabled(self._eq_enabled)
@@ -1983,7 +1931,6 @@ class App:
         self.player.set_eq_preamp(self._eq_preamp)
         self._persist_settings()
 
-    # --- Alpha / transparency --------------------------------------------
     def _apply_alpha_to_windows(self):
         try:
             a = float(self.alpha_scale.get()) / 100.0
@@ -2033,7 +1980,6 @@ class App:
             except Exception:
                 pass
 
-    # --- Drag & Drop -----------------------------------------------------
     def _setup_dnd(self):
         if not _DND_AVAILABLE or DND_FILES is None:
             return
@@ -2079,7 +2025,6 @@ class App:
                     if is_media_file(p):
                         media.append(p)
 
-        # Import any dropped playlist files as well
         for pl_path in playlists:
             entries, _missing = read_m3u(pl_path)
             media.extend(entries)
@@ -2119,7 +2064,6 @@ class App:
                 i = j
         return [p for p in paths if p]
 
-    # --- Color changes ---------------------------------------------------
     def apply_accent(self, accent_hex, persist=False, rebuild=True):
         self.accent = accent_hex
         self.palette = build_palette(accent_hex)
@@ -2188,11 +2132,24 @@ class App:
 
     def _mkbtn(self, parent, text, cmd, w=4, bg=None):
         p = self.palette
-        return tk.Button(parent, text=text, width=w, command=cmd,
-                         bg=(bg if bg else p["RAISED"]), fg=p["WHITE"],
-                         activebackground=lighten(p["RAISED"], 0.15),
-                         activeforeground=p["WHITE"],
-                         relief="raised", bd=1, font=FONT_BTN, takefocus=0)
+        bg_color = bg if bg else p["RAISED"]
+        fg_color = p["WHITE"]
+        hover_bg = lighten(bg_color, 0.15)
+
+        if IS_MAC:
+            lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                           font=FONT_BTN, padx=8, pady=3,
+                           relief="raised", bd=1, cursor="hand2")
+            lbl.bind("<Button-1>", lambda e: cmd())
+            lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_bg))
+            lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+            return lbl
+        else:
+            return tk.Button(parent, text=text, width=w, command=cmd,
+                             bg=bg_color, fg=fg_color,
+                             activebackground=hover_bg,
+                             activeforeground=fg_color,
+                             relief="raised", bd=1, font=FONT_BTN, takefocus=0)
 
     def _mk_pl_scale(self, parent):
         p = self.palette
@@ -2354,6 +2311,9 @@ class App:
         self._mkbtn(pbtns, "REMOVE",     self.remove_selected,   w=8).pack(side="right")
         self._mkbtn(pbtns, "CLEAR",      self.clear_playlist,    w=6).pack(side="right", padx=(0, 4))
 
+        self._mkbtn(pbtns, "▲", self.move_up,   w=3).pack(side="left", padx=(6, 0))
+        self._mkbtn(pbtns, "▼", self.move_down, w=3).pack(side="left", padx=(2, 0))
+
         srow = tk.Frame(self._main_frame, bg=p["PANEL"])
         srow.pack(fill="x", side="bottom")
         self.status_left = tk.Label(srow, text="Ready — add files to begin.",
@@ -2373,6 +2333,48 @@ class App:
         except Exception:
             pass
         return "break"
+
+    # --- Playlist reorder -----------------------------------------------
+    def move_up(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        if i <= 0:
+            return
+        self._swap_items(i, i - 1)
+
+    def move_down(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        if i >= len(self.playlist) - 1:
+            return
+        self._swap_items(i, i + 1)
+
+    def _swap_items(self, i, j):
+        if not (0 <= i < len(self.playlist) and 0 <= j < len(self.playlist)):
+            return
+        if i == j:
+            return
+
+        self.playlist[i], self.playlist[j] = self.playlist[j], self.playlist[i]
+
+        self.listbox.delete(0, "end")
+        for p in self.playlist:
+            self.listbox.insert("end", os.path.basename(p))
+
+        self.listbox.selection_clear(0, "end")
+        self.listbox.selection_set(j)
+        self.listbox.see(j)
+
+        if self.current_index == i:
+            self.current_index = j
+        elif self.current_index == j:
+            self.current_index = i
+
+        self._persist_settings()
 
     # --- Background ------------------------------------------------------
     def _initial_bg(self):
@@ -2525,7 +2527,6 @@ class App:
         if not paths:
             return
 
-        # Separate media files from playlist files
         media = []
         playlists = []
         for p in paths:
@@ -2569,12 +2570,6 @@ class App:
         self.add_paths(found)
 
     def add_paths(self, paths):
-        """
-        Append media files to the playlist. Duplicates are skipped.
-        Any .m3u/.m3u8 files are automatically expanded (imported).
-        Playlist is auto-saved after a successful change.
-        """
-        # Expand any nested playlist files first
         expanded = []
         for p in paths:
             ap = os.path.abspath(p)
@@ -2638,7 +2633,6 @@ class App:
 
     # --- Playlist import / export ---------------------------------------
     def export_playlist_m3u(self):
-        """Export the current playlist as an .m3u file."""
         if not self.playlist:
             self.status_left.config(text="Nothing to export — playlist is empty.",
                                     fg=self.palette["GRAY"])
@@ -2659,10 +2653,6 @@ class App:
             self.status_left.config(text=f"Export failed: {e}", fg=self.palette["ERR"])
 
     def import_playlist(self):
-        """
-        Show a dialog to pick one or more M3U/M3U8 files and import them.
-        Existing entries are kept; new entries are appended (no duplicates).
-        """
         pl_exts = " ".join(f"*{e}" for e in sorted(PLAYLIST_EXTS))
         paths = filedialog.askopenfilenames(
             title="Import playlist(s)",
