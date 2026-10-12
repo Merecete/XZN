@@ -27,11 +27,13 @@ A classic media player with a cyberpunk look — video, audio,
 ## Installation
 
 ```bash
-git clone https://github.com/merecete/xenon-zones.git
-cd xenon-zones
+git clone https://github.com/Merecete/Xenon-Zones.git
+cd Xenon-Zones
 python -m venv .venv
+
 # Windows:
 .venv\Scripts\activate
+
 # Linux/macOS:
 source .venv/bin/activate
 
