@@ -1,6 +1,6 @@
 # Xenon Zones (XZN)
 
-A classic media player with a cyberpunk look — video, audio,
+A classic media player with a cyberpunk look, video, audio,
 10-band EQ, playlists and more. Built in Python.
 
 ## Screenshots
