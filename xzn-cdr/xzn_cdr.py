@@ -1119,7 +1119,7 @@ class InfoWindow:
 
         tk.Label(frame, text=f"Version {VERSION}",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w")
-        tk.Label(frame, text="© 2026 Xenon Zones",
+        tk.Label(frame, text="© 2026 Merecete",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(2, 2))
         tk.Label(frame, text="Released under the MIT License.",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
