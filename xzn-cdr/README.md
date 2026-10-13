@@ -1,1 +1,5 @@
-
+# XZN-CDR dependencies
+#
+# pycdio is only needed on Linux and macOS — Windows uses ffmpeg's
+# built-in libcdio backend, so pycdio isn't required there.
+pycdio>=2.1.0; sys_platform != "win32"
