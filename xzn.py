@@ -1475,7 +1475,7 @@ class InfoWindow:
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w")
 
-        tk.Label(frame, text="© 2026 Xenon Zones",
+        tk.Label(frame, text="© 2026 Merecete",
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(2, 2))
 
