@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# ffmpeg binaries — too big for Git. Bundled into the .exe at build time.
+ffmpeg/
+ffmpeg.exe
+ffprobe.exe
+
+# OS clutter
+.DS_Store
+Thumbs.db
+*.log
