@@ -10,10 +10,9 @@
 
 ## Installation
 
-```bash
-git clone https://github.com/Merecete/Xenon-Zones.git
+`git clone https://github.com/Merecete/Xenon-Zones.git
 cd Xenon-Zones/xzn-cdr
-python -m venv .venv
+python -m venv .venv`
 
 # Windows:
 .venv\Scripts\activate
