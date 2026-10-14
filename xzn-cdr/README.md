@@ -31,3 +31,5 @@ sudo apt install python3-venv python3-tk libportaudio2 \
                  libcdio-dev libiso9660-dev \
                  libcdio-paranoia-dev libcdio-cdda-dev
 \`\`\`
+
+**macOS:** use `xzn_cdr_mac.py` (requires `brew install cdparanoia ffmpeg`)
