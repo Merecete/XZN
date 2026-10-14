@@ -20,7 +20,7 @@ Xenon Zones (XZN) v4.6
 - v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
 - v4.6: All windows (EQ, Info, Theme) now use macOS-safe buttons
 
-Copyright (c) 2026 Xenon Zones
+Copyright (c) 2026 Merecete
 
 Released under the MIT License. See LICENSE file for details.
 """
