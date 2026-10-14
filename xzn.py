@@ -73,7 +73,7 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
 # --- Icon constants -----------------------------------------------------
 ICON_FILENAME = "xzn.ico"
-TASKBAR_APP_ID = "com.katie.xzn.mediaplayer.1"
+TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
 
 # --- Default palette (dark bluish purple) -------------------------------
 DEFAULT_PALETTE = {
