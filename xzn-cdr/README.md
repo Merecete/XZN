@@ -22,3 +22,12 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+
+### Linux (Debian/Ubuntu)
+
+\`\`\`bash
+sudo apt install python3-venv python3-tk libportaudio2 \
+                 pkg-config swig \
+                 libcdio-dev libiso9660-dev \
+                 libcdio-paranoia-dev libcdio-cdda-dev
+\`\`\`
