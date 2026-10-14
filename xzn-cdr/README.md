@@ -11,8 +11,8 @@
 ## Installation
 
 ```bash
-git clone https://github.com/Merecete/Xenon-Zones/xzn-cdr.git
-cd xzn-cdr
+git clone https://github.com/Merecete/Xenon-Zones.git
+cd cd Xenon-Zones/xzn-cdr
 python -m venv .venv
 
 # Windows:
