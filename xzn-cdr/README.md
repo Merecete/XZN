@@ -24,12 +24,11 @@ pip install -r requirements.txt
 
 ### Linux (Debian/Ubuntu)
 
-\`\`\`bash
-sudo apt install python3-venv python3-tk libportaudio2 \
+
+`sudo apt install python3-venv python3-tk libportaudio2 \
                  pkg-config swig ffmpeg \
                  libcdio-dev libiso9660-dev \
-                 libcdio-paranoia-dev libcdio-cdda-dev
-\`\`\`
+                 libcdio-paranoia-dev libcdio-cdda-dev`
 
 **Windows/Linux:** use `xzn-cdr.py`
 **macOS:** use `xzn-cdr-mac.py` (requires `brew install cdparanoia ffmpeg`)
