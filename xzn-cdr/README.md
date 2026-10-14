@@ -7,3 +7,18 @@
 ## Screenshots
 
 ![Main window](main.png)
+
+## Installation
+
+```bash
+git clone https://github.com/Merecete/Xenon-Zones/xzn-cdr.git
+cd xzn-cdr
+python -m venv .venv
+
+# Windows:
+.venv\Scripts\activate
+
+# Linux/macOS:
+source .venv/bin/activate
+
+pip install -r requirements.txt
