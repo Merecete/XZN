@@ -169,12 +169,10 @@ def find_ffmpeg() -> Optional[str]:
     <base>/ffmpeg/ffmpeg (Linux/macOS) when frozen.
     Falls back to whatever is on PATH (for running from source).
     """
-    # Try bundled first
     exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
     bundled = resource_path(os.path.join("ffmpeg", exe_name))
     if os.path.isfile(bundled):
         return bundled
-    # Fallback to system PATH
     return shutil.which("ffmpeg")
 
 
@@ -299,10 +297,6 @@ def build_palette(accent_hex):
 
 
 def _detect_windows_cd_drives() -> List[str]:
-    """
-    Return a list of CD/DVD drive letters on Windows (e.g. ["D:", "E:"]).
-    Uses GetDriveTypeW from kernel32 via ctypes.
-    """
     result = []
     if sys.platform != "win32" or ctypes is None:
         return result
@@ -323,11 +317,6 @@ def _detect_windows_cd_drives() -> List[str]:
 
 
 def _suggest_default_drive() -> Optional[str]:
-    """
-    Try to guess a reasonable default CD device for the current platform.
-    On Windows, uses GetDriveTypeW to find actual optical drives; returns
-    None if none is found (so we don't fall back to a Linux path).
-    """
     if sys.platform == "win32":
         drives = _detect_windows_cd_drives()
         return drives[0] if drives else None
@@ -365,7 +354,6 @@ def load_settings():
     except Exception as e:
         print(f"[XZN-CDR] Failed to load settings: {e}")
 
-    # Sanity check: discard drive strings that belong to another platform
     drv = defaults.get("drive") or ""
     if sys.platform == "win32" and drv.startswith("/"):
         defaults["drive"] = _suggest_default_drive() or ""
@@ -395,12 +383,10 @@ def fmt_time(seconds):
 # Cancellation helpers
 # ------------------------------------------------------------------------
 class CancelledError(Exception):
-    """Raised internally when the user cancels a rip."""
     pass
 
 
 def _kill_process(proc):
-    """Force-terminate a subprocess, ignoring errors."""
     try:
         proc.terminate()
     except Exception:
@@ -415,7 +401,6 @@ def _kill_process(proc):
 
 
 def _safe_unlink(path):
-    """Delete a file, ignoring errors if it's locked or missing."""
     try:
         if path and os.path.isfile(path):
             os.remove(path)
@@ -427,12 +412,6 @@ def _safe_unlink(path):
 # ffmpeg libcdio helpers (used on Windows)
 # ------------------------------------------------------------------------
 def ffmpeg_list_tracks_windows(ffmpeg_path: str, drive: str) -> List[Tuple[int, float]]:
-    """
-    Query the CD's table of contents on Windows via ffprobe/libcdio.
-
-    ffprobe reports each audio track as a chapter with a start_time and
-    end_time. We parse those to build (track_number, duration_seconds).
-    """
     ffprobe = find_ffprobe()
     if not ffprobe:
         raise RuntimeError(
@@ -505,16 +484,6 @@ def ffmpeg_read_track_windows(ffmpeg_path: str, drive: str,
                               progress_callback=None,
                               cancel_event=None,
                               is_last_track: bool = False) -> None:
-    """
-    Rip a single track on Windows using ffmpeg -f libcdio.
-
-    If cancel_event is set at any point, the ffmpeg process is killed
-    and the partial output file is deleted. Raises CancelledError.
-
-    If is_last_track is True, the track duration is shortened by a small
-    safety margin to avoid the libcdparanoia busy-loop at the very end
-    of the disc.
-    """
     effective_duration = duration_sec
     if is_last_track:
         effective_duration = max(0.5, duration_sec - LAST_TRACK_SAFETY_MARGIN)
@@ -593,7 +562,6 @@ def ffmpeg_read_track_windows(ffmpeg_path: str, drive: str,
 # pycdio helpers (used on Linux/macOS)
 # ------------------------------------------------------------------------
 def pycdio_list_tracks(device: str) -> List[Tuple[int, float]]:
-    """Query the CD's TOC using pycdio. Returns list of (track_no, duration_sec)."""
     if not _PYCDIO_AVAILABLE:
         raise RuntimeError("pycdio is not available.")
 
@@ -640,8 +608,6 @@ def pycdio_list_tracks(device: str) -> List[Tuple[int, float]]:
 def pycdio_read_track(device: str, track_num: int,
                       progress_callback=None,
                       cancel_event=None) -> bytes:
-    """Read raw PCM for one track via pycdio. Returns bytes.
-    Raises CancelledError if cancel_event is set during reading."""
     if not _PYCDIO_AVAILABLE:
         raise RuntimeError("pycdio is not available.")
 
@@ -701,7 +667,6 @@ def pycdio_read_track(device: str, track_num: int,
 
 
 def pycdio_write_wav(path: str, pcm_data: bytes) -> None:
-    """Write raw 16-bit stereo PCM to a WAV file."""
     with wave.open(path, "wb") as wf:
         wf.setnchannels(AUDIO_CHANNELS)
         wf.setsampwidth(AUDIO_BYTES_PER_SAMPLE)
@@ -714,11 +679,11 @@ def pycdio_write_wav(path: str, pcm_data: bytes) -> None:
 # ------------------------------------------------------------------------
 @dataclass
 class RipJob:
-    tracks: List[int]              # 1-based track numbers (both backends)
-    track_durations: List[float]   # duration per track (seconds)
+    tracks: List[int]
+    track_durations: List[float]
     outdir: str
-    fmt: str                       # "MP3", "OGG", "WAV", "FLAC"
-    bitrate: str                   # "128", "192", "256", "320"
+    fmt: str
+    bitrate: str
     drive: str
     eject: bool
     ffmpeg: Optional[str]
@@ -737,7 +702,6 @@ class RipJob:
 
 
 def build_ffmpeg_args(job: RipJob, wav_path: str, out_path: str) -> List[str]:
-    """Build the ffmpeg command to encode a WAV into the target format."""
     args = [job.ffmpeg or "ffmpeg", "-y", "-i", wav_path]
     if job.fmt == "MP3":
         args += ["-codec:a", "libmp3lame", "-b:a", f"{job.bitrate}k"]
@@ -753,7 +717,6 @@ def build_ffmpeg_args(job: RipJob, wav_path: str, out_path: str) -> List[str]:
 
 
 def _eject_drive(device: str, ui_queue: "queue.Queue"):
-    """Attempt to eject the CD drive. Silently skips on failure."""
     try:
         if sys.platform == "win32":
             letter = device.rstrip(":\\/")
@@ -792,11 +755,6 @@ def _eject_drive(device: str, ui_queue: "queue.Queue"):
 
 
 def rip_worker_ffmpeg_windows(job: RipJob, ui_queue: "queue.Queue"):
-    """
-    Windows-only ripper: uses `ffmpeg -f libcdio` directly.
-    Supports cancellation via job.cancel_event.
-    Passes is_last_track=True for the final track to apply the safety margin.
-    """
     if not job.ffmpeg:
         ui_queue.put(("error", "ffmpeg not found."))
         return
@@ -867,10 +825,6 @@ def rip_worker_ffmpeg_windows(job: RipJob, ui_queue: "queue.Queue"):
 
 
 def rip_worker_pycdio(job: RipJob, ui_queue: "queue.Queue"):
-    """
-    Linux/macOS ripper: reads via pycdio, writes WAV, then optionally
-    encodes with ffmpeg. Supports cancellation via job.cancel_event.
-    """
     if not _PYCDIO_AVAILABLE:
         ui_queue.put(("error", "pycdio is not available."))
         return
@@ -1045,14 +999,8 @@ class ThemeWindow:
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(fill="x", pady=(14, 0))
 
-        tk.Button(btn_row, text="Default (Purple)",
-                  command=self._reset,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=4).pack(side="left")
-        tk.Button(btn_row, text="Close",
-                  command=self.win.destroy,
-                  bg=p["RAISED"], fg=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=10, pady=4).pack(side="right")
+        app._mkbtn(btn_row, "Default (Purple)", self._reset, w=14).pack(side="left")
+        app._mkbtn(btn_row, "Close", self.win.destroy, w=8).pack(side="right")
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -1078,7 +1026,7 @@ class ThemeWindow:
 
 
 class InfoWindow:
-    def __init__(self, master, palette):
+    def __init__(self, master, palette, app):
         self.win = tk.Toplevel(master)
         self.win.title("Info – XZN-CDR")
         self.win.configure(bg=palette["PANEL"])
@@ -1124,11 +1072,8 @@ class InfoWindow:
         tk.Label(frame, text="Released under the MIT License.",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
-        tk.Button(frame, text="Close", command=self.win.destroy,
-                  bg=p["RAISED"], fg=p["WHITE"],
-                  activebackground=lighten(p["RAISED"], 0.15),
-                  activeforeground=p["WHITE"], relief="raised", bd=1,
-                  font=FONT_UI_B, padx=14, pady=4).pack(anchor="e")
+        close_btn = app._mkbtn(frame, "Close", self.win.destroy, w=8)
+        close_btn.pack(anchor="e")
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -1197,11 +1142,24 @@ class App:
     # -- UI ---------------------------------------------------------------
     def _mkbtn(self, parent, text, cmd, w=4):
         p = self.palette
-        return tk.Button(parent, text=text, width=w, command=cmd,
-                         bg=p["RAISED"], fg=p["WHITE"],
-                         activebackground=lighten(p["RAISED"], 0.15),
-                         activeforeground=p["WHITE"],
-                         relief="raised", bd=1, font=FONT_BTN, takefocus=0)
+        bg_color = p["RAISED"]
+        fg_color = p["WHITE"]
+        hover_bg = lighten(bg_color, 0.15)
+
+        if sys.platform == "darwin" or sys.platform.startswith("linux"):
+            lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                           font=FONT_BTN, padx=8, pady=3,
+                           relief="raised", bd=1, cursor="hand2")
+            lbl.bind("<Button-1>", lambda e: cmd())
+            lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_bg))
+            lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+            return lbl
+        else:
+            return tk.Button(parent, text=text, width=w, command=cmd,
+                             bg=bg_color, fg=fg_color,
+                             activebackground=hover_bg,
+                             activeforeground=fg_color,
+                             relief="raised", bd=1, font=FONT_BTN, takefocus=0)
 
     def _mk_pl_scale(self, parent):
         """Create a vertical tk.Scale styled exactly like XZN's playlist
@@ -1395,7 +1353,6 @@ class App:
         self.btn_rip_sel.pack(side="left", padx=(0, 4))
         self.btn_cancel = self._mkbtn(brow, "CANCEL", self.cancel_rip, w=8)
         self.btn_cancel.pack(side="left", padx=(0, 4))
-        self.btn_cancel.config(state="disabled")
         self.btn_open_out = self._mkbtn(brow, "OPEN FOLDER", self.open_outdir, w=12)
         self.btn_open_out.pack(side="right", padx=(4, 10))
 
@@ -1454,7 +1411,7 @@ class App:
 
     # -- Info / Theme -----------------------------------------------------
     def show_info(self):
-        InfoWindow(self.root, self.palette)
+        InfoWindow(self.root, self.palette, self)
 
     def show_theme(self):
         ThemeWindow(self.root, self)
@@ -1644,13 +1601,13 @@ class App:
 
     def rip_all(self):
         if not self.cd_tracks:
-            self.status.config(text="Scan a CD first.", fg=self.palette["ERR"])
+            self.status.config(text="Scan a CD first.", fg=p["ERR"])
             return
         self._start_rip(list(self.cd_tracks))
 
     def rip_selected(self):
         if not self.cd_tracks:
-            self.status.config(text="Scan a CD first.", fg=self.palette["ERR"])
+            self.status.config(text="Scan a CD first.", fg=p["ERR"])
             return
         selected = [t for t, var in zip(self.cd_tracks, self.track_checks) if var.get()]
         self._start_rip(selected)
@@ -1677,9 +1634,6 @@ class App:
         )
 
         self.ripping = True
-        self.btn_rip.config(state="disabled")
-        self.btn_rip_sel.config(state="disabled")
-        self.btn_cancel.config(state="normal")
         self._progress_value = 0.0
         self._progress_label = ""
         self._draw_progress(0.0)
@@ -1702,7 +1656,6 @@ class App:
             if self._cancel_event is not None:
                 self._cancel_event.set()
             self.status.config(text="Cancelling…", fg=self.palette["ERR"])
-            self.btn_cancel.config(state="disabled")
         except Exception as e:
             print(f"[XZN-CDR] Cancel failed: {e}")
 
@@ -1756,12 +1709,6 @@ class App:
 
     def _finish_rip_ok(self):
         self.ripping = False
-        try:
-            self.btn_rip.config(state="normal")
-            self.btn_rip_sel.config(state="normal")
-            self.btn_cancel.config(state="disabled")
-        except Exception:
-            pass
 
     # -- Shutdown ---------------------------------------------------------
     def on_close(self):
