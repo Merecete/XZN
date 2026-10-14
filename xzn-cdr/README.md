@@ -24,7 +24,6 @@ pip install -r requirements.txt
 
 ### Linux (Debian/Ubuntu)
 
-
 `sudo apt install python3-venv python3-tk libportaudio2 \
                  pkg-config swig ffmpeg \
                  libcdio-dev libiso9660-dev \
