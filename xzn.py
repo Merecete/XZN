@@ -20,7 +20,7 @@ Xenon Zones (XZN) v4.6
 - v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
 - v4.6: All windows (EQ, Info, Theme) now use macOS-safe buttons
 
-Copyright (c) 2026 Merecete
+Copyright (c) 2026 Xenon Zones
 
 Released under the MIT License. See LICENSE file for details.
 """
@@ -415,7 +415,7 @@ def make_flat_button(parent, text, cmd, palette, width=None,
     fg_color = fg if fg is not None else palette["WHITE"]
     font_use = font if font is not None else FONT_UI_B
 
-    if IS_MAC:
+    if IS_MAC or not IS_WINDOWS:
         lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
                        font=font_use, padx=padx, pady=pady,
                        relief="raised", bd=1, cursor="hand2")
