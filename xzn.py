@@ -2155,7 +2155,7 @@ class App:
         fg_color = p["WHITE"]
         hover_bg = lighten(bg_color, 0.15)
 
-        if IS_MAC:
+        if IS_MAC or not IS_WINDOWS:
             lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
                            font=FONT_BTN, padx=8, pady=3,
                            relief="raised", bd=1, cursor="hand2")
