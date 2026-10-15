@@ -47,8 +47,8 @@ Python's standard library plus twp external command-line tools:
 
 Install both once via Homebrew:
 
-`brew install libcdio-paranoia ffmpeg`
+brew install libcdio-paranoia ffmpeg
 
 If you don't have Homebrew:
 
-`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
