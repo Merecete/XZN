@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon Zones (XZN) v4.6
+Xenon Zones (XZN) v4.8
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -19,6 +19,10 @@ Xenon Zones (XZN) v4.6
 - v4.6: macOS-compatible buttons (Label-based on darwin)
 - v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
 - v4.6: All windows (EQ, Info, Theme) now use macOS-safe buttons
+- v4.7: macOS menu cleaned up (no File/Edit/Window/Help)
+        About entry opens the custom Info window
+- v4.8: Hero bottom fade now baked into the image (fixes macOS
+        where Tk's stipple is ignored and the overlay looked cut off)
 
 Copyright (c) 2026 Merecete
 
@@ -400,6 +404,34 @@ def load_background(w, h, palette, custom_path=None):
                 print(f"[XZN] Failed to load BG ({p}): {e}")
 
     return _make_gradient_bg(w, h, palette)
+
+
+def _apply_hero_fade(img, palette):
+    """
+    Softly darken the bottom of the hero image.
+    Replaces the Tk stipple rectangle, which does not work on macOS.
+    """
+    w, h = img.size
+    fade_height = min(90, max(40, h // 3))
+
+    is_light_theme = luminance(palette["BG"]) > 0.5
+    if is_light_theme:
+        fade_rgb = (255, 255, 255)
+    else:
+        fade_rgb = hex_to_rgb(palette["SUNKEN"])
+
+    fade = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(fade)
+    for y in range(fade_height):
+        # Eased gradient: subtle at top, stronger at the very bottom
+        t = y / max(1, fade_height - 1)
+        alpha = int(180 * (t ** 1.6))
+        y_actual = h - fade_height + y
+        draw.line([(0, y_actual), (w, y_actual)],
+                  fill=fade_rgb + (alpha,))
+
+    img_rgba = img.convert("RGBA")
+    return Image.alpha_composite(img_rgba, fade).convert("RGB")
 
 
 def make_flat_button(parent, text, cmd, palette, width=None,
@@ -1841,6 +1873,7 @@ class App:
                 print("[XZN] Drag & Drop disabled (pip install tkinterdnd2)")
 
         apply_window_icon(self.root)
+        self._setup_macos_menu()
 
         self.root.title("XZN")
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
@@ -1924,6 +1957,33 @@ class App:
             self.root.bind(k, lambda e: self.show_equalizer())
 
         self.root.after(80, self._initial_bg)
+
+    # --- macOS menu ------------------------------------------------------
+    def _setup_macos_menu(self):
+        """
+        macOS-specific:
+        - Remove the default File / Edit / Window / Help menus.
+        - Make the 'About XZN' entry open our own Info window instead of
+          the built-in one (which would show 'XZN 0.0.0' from Info.plist).
+        """
+        if not IS_MAC:
+            return
+        try:
+            menubar = tk.Menu(self.root)
+            self.root.config(menu=menubar)
+            self.root.createcommand(
+                "tk::mac::standardAboutPanel", self._show_mac_about
+            )
+            print("[XZN] macOS menu customized.")
+        except Exception as e:
+            print(f"[XZN] macOS menu setup failed: {e}")
+
+    def _show_mac_about(self):
+        """Called when the user picks 'About XZN' from the macOS app menu."""
+        try:
+            self.show_info()
+        except Exception as e:
+            print(f"[XZN] macOS About failed: {e}")
 
     def _persist_settings(self):
         try:
@@ -2419,6 +2479,7 @@ class App:
             w = max(self.hero.winfo_width(), 40)
             h = max(self.hero.winfo_height(), 40)
             img = load_background(w, h, self.palette, self._bg_path)
+            img = _apply_hero_fade(img, self.palette)
             self._bg_photo = ImageTk.PhotoImage(img)
             self.hero.delete("bg")
             self.hero.create_image(0, 0, image=self._bg_photo, anchor="nw", tags="bg")
@@ -2438,14 +2499,6 @@ class App:
         c.delete("fg")
 
         is_light_theme = luminance(p["BG"]) > 0.5
-        try:
-            if is_light_theme:
-                c.create_rectangle(0, h - 60, w, h, fill="#ffffff", outline="", stipple="gray50", tags="fg")
-            else:
-                c.create_rectangle(0, h - 60, w, h, fill=p["SUNKEN"], outline="", stipple="gray50", tags="fg")
-        except Exception:
-            pass
-
         text = "XZN"
         font = ("Helvetica", 22, "bold")
         shadow = "#000000" if not is_light_theme else "#ffffff"
