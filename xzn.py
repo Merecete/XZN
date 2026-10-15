@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon Zones (XZN) v4.8
+Xenon Zones (XZN) v4.9
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -23,6 +23,7 @@ Xenon Zones (XZN) v4.8
         About entry opens the custom Info window
 - v4.8: Hero bottom fade now baked into the image (fixes macOS
         where Tk's stipple is ignored and the overlay looked cut off)
+- v4.9: EQ preset dropdown now uses FlatOptionMenu (macOS-safe)
 
 Copyright (c) 2026 Merecete
 
@@ -423,7 +424,6 @@ def _apply_hero_fade(img, palette):
     fade = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(fade)
     for y in range(fade_height):
-        # Eased gradient: subtle at top, stronger at the very bottom
         t = y / max(1, fade_height - 1)
         alpha = int(180 * (t ** 1.6))
         y_actual = h - fade_height + y
@@ -1600,6 +1600,143 @@ class ThemeWindow:
 
 
 # ------------------------------------------------------------------------
+class FlatOptionMenu:
+    """
+    Cross-platform replacement for tk.OptionMenu.
+
+    On macOS, tk.OptionMenu ignores bg/fg (Aqua theme), so we use a
+    Label + borderless Toplevel popup instead. Works on all platforms.
+    """
+
+    def __init__(self, parent, var, options, palette, width=10, on_change=None):
+        self.palette = palette
+        self.var = var
+        self.options = list(options)
+        self.on_change = on_change
+        self._popup = None
+
+        bg_color = palette["RAISED"]
+        fg_color = palette["WHITE"]
+
+        self.btn = tk.Label(
+            parent,
+            text=var.get(),
+            bg=bg_color, fg=fg_color,
+            font=FONT_UI_B, padx=8, pady=3,
+            relief="raised", bd=1, cursor="hand2",
+            width=width, anchor="w",
+        )
+        self.btn.bind("<Button-1>", self._open)
+        self.btn.bind("<Enter>", lambda e: self.btn.config(bg=lighten(bg_color, 0.15)))
+        self.btn.bind("<Leave>", lambda e: self.btn.config(bg=bg_color))
+
+        # Keep label text in sync with the variable
+        try:
+            self.var.trace_add("write", lambda *a: self._update_text())
+        except Exception:
+            try:
+                self.var.trace("w", lambda *a: self._update_text())
+            except Exception:
+                pass
+
+    def _update_text(self):
+        try:
+            self.btn.config(text=self.var.get())
+        except Exception:
+            pass
+
+    def grid(self, **kwargs):
+        self.btn.grid(**kwargs)
+        return self
+
+    def pack(self, **kwargs):
+        self.btn.pack(**kwargs)
+        return self
+
+    def _open(self, event=None):
+        if self._popup is not None:
+            return
+        p = self.palette
+
+        self._popup = tk.Toplevel(self.btn)
+        self._popup.overrideredirect(True)
+        self._popup.configure(bg=p["ACCENT_LO"])
+        try:
+            self._popup.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        inner = tk.Frame(self._popup, bg=p["RAISED"], bd=0, highlightthickness=0)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        for opt in self.options:
+            item = tk.Label(
+                inner, text=opt, font=FONT_UI,
+                bg=p["RAISED"], fg=p["WHITE"],
+                anchor="w", padx=14, pady=4, cursor="hand2",
+            )
+            item.pack(fill="x")
+            item.bind("<Enter>", lambda e, w=item: w.config(bg=p["ACCENT"], fg=p["WHITE"]))
+            item.bind("<Leave>", lambda e, w=item: w.config(bg=p["RAISED"], fg=p["WHITE"]))
+            item.bind("<Button-1>", lambda e, o=opt: self._select(o))
+
+        x = self.btn.winfo_rootx()
+        y = self.btn.winfo_rooty() + self.btn.winfo_height()
+        self._popup.geometry(f"+{x}+{y}")
+
+        try:
+            self._popup.focus_set()
+        except Exception:
+            pass
+
+        self._popup.bind("<FocusOut>", lambda e: self._close())
+        self._popup.bind("<Escape>", lambda e: self._close())
+        self.btn.bind_all("<Button-1>", self._on_global_click, add="+")
+
+    def _on_global_click(self, event):
+        if self._popup is None:
+            return
+        try:
+            w = self.btn.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        p = w
+        while p is not None:
+            if p is self._popup:
+                return
+            try:
+                p = p.master
+            except Exception:
+                p = None
+        self._close()
+
+    def _select(self, value):
+        try:
+            self.var.set(value)
+        except Exception:
+            pass
+        if self.on_change is not None:
+            try:
+                self.on_change(value)
+            except Exception:
+                pass
+        self._close()
+
+    def _close(self):
+        if self._popup is None:
+            return
+        try:
+            self.btn.unbind_all("<Button-1>")
+        except Exception:
+            pass
+        try:
+            self._popup.destroy()
+        except Exception:
+            pass
+        self._popup = None
+
+
+# ------------------------------------------------------------------------
 class EqualizerWindow:
     def __init__(self, master, app):
         self.app = app
@@ -1669,17 +1806,10 @@ class EqualizerWindow:
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
 
         self.preset_var = tk.StringVar(value="Flat")
-        preset_menu = tk.OptionMenu(preset_row, self.preset_var, *EQ_PRESETS.keys(),
-                                    command=self._apply_preset)
-        preset_menu.config(bg=p["RAISED"], fg=p["WHITE"],
-                           activebackground=p["ACCENT"],
-                           activeforeground=p["WHITE"],
-                           highlightthickness=0, bd=1, relief="raised",
-                           font=FONT_UI_B, width=10)
-        preset_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
-                                   activebackground=p["ACCENT"],
-                                   activeforeground=p["WHITE"],
-                                   font=FONT_UI)
+        preset_menu = FlatOptionMenu(preset_row, self.preset_var,
+                                     list(EQ_PRESETS.keys()),
+                                     palette=p, width=12,
+                                     on_change=self._apply_preset)
         preset_menu.pack(side="left", padx=(6, 0))
 
         footer = tk.Frame(self.win, bg=p["PANEL"])
@@ -1960,12 +2090,6 @@ class App:
 
     # --- macOS menu ------------------------------------------------------
     def _setup_macos_menu(self):
-        """
-        macOS-specific:
-        - Remove the default File / Edit / Window / Help menus.
-        - Make the 'About XZN' entry open our own Info window instead of
-          the built-in one (which would show 'XZN 0.0.0' from Info.plist).
-        """
         if not IS_MAC:
             return
         try:
@@ -1979,7 +2103,6 @@ class App:
             print(f"[XZN] macOS menu setup failed: {e}")
 
     def _show_mac_about(self):
-        """Called when the user picks 'About XZN' from the macOS app menu."""
         try:
             self.show_info()
         except Exception as e:
