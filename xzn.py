@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon Zones (XZN) v4.9
+Xenon Zones (XZN) v5.0
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -24,6 +24,7 @@ Xenon Zones (XZN) v4.9
 - v4.8: Hero bottom fade now baked into the image (fixes macOS
         where Tk's stipple is ignored and the overlay looked cut off)
 - v4.9: EQ preset dropdown now uses FlatOptionMenu (macOS-safe)
+- v5.0: Tag editor via right-click on a playlist entry (mutagen)
 
 Copyright (c) 2026 Merecete
 
@@ -66,6 +67,14 @@ except Exception:
     TkinterDnD = None  # type: ignore
     DND_FILES = None   # type: ignore
     _DND_AVAILABLE = False
+
+# --- Optional: Tag editing ----------------------------------------------
+try:
+    from mutagen import File as MutagenFile  # type: ignore
+    _MUTAGEN_AVAILABLE = True
+except Exception:
+    MutagenFile = None  # type: ignore
+    _MUTAGEN_AVAILABLE = False
 
 
 APP_NAME = "Xenon Zones"
@@ -119,6 +128,12 @@ MEDIA_EXTS = {
     ".mpg", ".mpeg", ".ts", ".m2ts", ".m4v", ".asf", ".3gp",
     ".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma", ".aac",
     ".m4a", ".m4b", ".aiff", ".ape", ".alac",
+}
+
+# Formats that mutagen can reliably write tags to
+TAGGABLE_AUDIO_EXTS = {
+    ".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".aac",
+    ".m4a", ".m4b", ".aiff", ".ape",
 }
 
 PLAYLIST_EXTS = {".m3u", ".m3u8"}
@@ -193,6 +208,10 @@ def fmt_time(t):
 
 def is_media_file(path):
     return os.path.splitext(path)[1].lower() in MEDIA_EXTS
+
+
+def is_taggable_audio(path):
+    return os.path.splitext(path)[1].lower() in TAGGABLE_AUDIO_EXTS
 
 
 def is_playlist_file(path):
@@ -438,10 +457,6 @@ def make_flat_button(parent, text, cmd, palette, width=None,
                      bg=None, fg=None, font=None, padx=14, pady=4):
     """
     Cross-platform button that respects bg/fg on macOS too.
-
-    On macOS, tk.Button ignores bg/fg (Aqua theme), so we use a
-    tk.Label with click bindings instead. On Windows/Linux this
-    returns a normal tk.Button.
     """
     bg_color = bg if bg is not None else palette["RAISED"]
     fg_color = fg if fg is not None else palette["WHITE"]
@@ -502,6 +517,65 @@ def read_m3u(path):
     if missing:
         print(f"[XZN] M3U import: {missing} path(s) not found and skipped")
     return out, missing
+
+
+# ------------------------------------------------------------------------
+# Tag reading / writing (mutagen)
+# ------------------------------------------------------------------------
+def read_tags(path):
+    """
+    Read the most common audio tags from a file.
+    Returns a dict with keys: title, artist, album, genre, date, tracknumber.
+    Missing values are empty strings.
+    """
+    result = {
+        "title": "", "artist": "", "album": "",
+        "genre": "", "date": "", "tracknumber": "",
+    }
+    if not _MUTAGEN_AVAILABLE or MutagenFile is None:
+        return result
+    try:
+        audio = MutagenFile(path, easy=True)
+        if audio is None:
+            return result
+        for key in result.keys():
+            val = audio.get(key)
+            if val and isinstance(val, (list, tuple)) and len(val) > 0:
+                result[key] = str(val[0]).strip()
+            elif isinstance(val, str):
+                result[key] = val.strip()
+    except Exception as e:
+        print(f"[XZN] Failed to read tags from '{path}': {e}")
+    return result
+
+
+def write_tags(path, tags):
+    """
+    Write the given tags to a file.
+    Empty values remove the corresponding tag.
+    Returns (success: bool, error_message: str).
+    """
+    if not _MUTAGEN_AVAILABLE or MutagenFile is None:
+        return False, "mutagen is not installed."
+    try:
+        audio = MutagenFile(path, easy=True)
+        if audio is None:
+            return False, "Could not open file for tag editing."
+        for key, value in tags.items():
+            try:
+                if value:
+                    audio[key] = [value]
+                else:
+                    if key in audio:
+                        del audio[key]
+            except Exception as e:
+                print(f"[XZN] Failed to set tag '{key}': {e}")
+        audio.save()
+        return True, ""
+    except PermissionError:
+        return False, "Permission denied — file may be read-only."
+    except Exception as e:
+        return False, f"Failed to save tags: {e}"
 
 
 # ------------------------------------------------------------------------
@@ -1603,11 +1677,7 @@ class ThemeWindow:
 class FlatOptionMenu:
     """
     Cross-platform replacement for tk.OptionMenu.
-
-    On macOS, tk.OptionMenu ignores bg/fg (Aqua theme), so we use a
-    Label + borderless Toplevel popup instead. Works on all platforms.
     """
-
     def __init__(self, parent, var, options, palette, width=10, on_change=None):
         self.palette = palette
         self.var = var
@@ -1619,8 +1689,7 @@ class FlatOptionMenu:
         fg_color = palette["WHITE"]
 
         self.btn = tk.Label(
-            parent,
-            text=var.get(),
+            parent, text=var.get(),
             bg=bg_color, fg=fg_color,
             font=FONT_UI_B, padx=8, pady=3,
             relief="raised", bd=1, cursor="hand2",
@@ -1630,7 +1699,6 @@ class FlatOptionMenu:
         self.btn.bind("<Enter>", lambda e: self.btn.config(bg=lighten(bg_color, 0.15)))
         self.btn.bind("<Leave>", lambda e: self.btn.config(bg=bg_color))
 
-        # Keep label text in sync with the variable
         try:
             self.var.trace_add("write", lambda *a: self._update_text())
         except Exception:
@@ -1886,6 +1954,128 @@ class EqualizerWindow:
 
 
 # ------------------------------------------------------------------------
+class TagEditorWindow:
+    """
+    Small tag editor for a single audio file.
+    Reads/writes common tags via mutagen's easy interface.
+    """
+    FIELDS = [
+        ("title",       "Title"),
+        ("artist",      "Artist"),
+        ("album",       "Album"),
+        ("genre",       "Genre"),
+        ("date",        "Year"),
+        ("tracknumber", "Track"),
+    ]
+
+    def __init__(self, master, app, path):
+        self.app = app
+        self.path = path
+        self.palette = app.palette
+        self._entries = {}
+
+        p = self.palette
+        self.win = tk.Toplevel(master)
+        self.win.title(f"Edit Tags – {os.path.basename(path)}")
+        self.win.configure(bg=p["PANEL"])
+        self.win.resizable(False, False)
+        self.win.transient(master)
+        apply_window_icon(self.win)
+
+        outer = tk.Frame(self.win, bg=p["PANEL"], padx=20, pady=18)
+        outer.pack(fill="both", expand=True)
+
+        tk.Label(outer, text="EDIT TAGS",
+                 font=("Helvetica", 12, "bold"),
+                 bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+
+        tk.Label(outer, text=os.path.basename(path),
+                 font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"],
+                 anchor="w", justify="left",
+                 wraplength=420).pack(anchor="w", pady=(2, 12))
+
+        tk.Frame(outer, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(0, 14))
+
+        # Read existing tags once
+        current = read_tags(path)
+
+        form = tk.Frame(outer, bg=p["PANEL"])
+        form.pack(fill="x")
+
+        for i, (key, label) in enumerate(self.FIELDS):
+            tk.Label(form, text=label + ":",
+                     font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"],
+                     width=8, anchor="w"
+                     ).grid(row=i, column=0, sticky="w", pady=3, padx=(0, 8))
+
+            wrap = tk.Frame(form, bg=p["SUNKEN"], bd=0, highlightthickness=0)
+            wrap.grid(row=i, column=1, sticky="ew", pady=3)
+
+            entry = tk.Entry(
+                wrap,
+                width=40,
+                bg=p["SUNKEN"], fg=p["WHITE"],
+                insertbackground=p["WHITE"],
+                relief="flat", bd=0, highlightthickness=0,
+                font=FONT_UI,
+            )
+            entry.pack(padx=6, pady=3, fill="x", expand=True)
+            entry.insert(0, current.get(key, ""))
+            self._entries[key] = entry
+
+        form.columnconfigure(1, weight=1)
+
+        tk.Frame(outer, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(14, 12))
+
+        btn_row = tk.Frame(outer, bg=p["PANEL"])
+        btn_row.pack(fill="x")
+
+        make_flat_button(btn_row, "Save",   self._save,          palette=p,
+                         padx=12, pady=4).pack(side="left")
+        make_flat_button(btn_row, "Cancel", self.win.destroy,     palette=p,
+                         padx=12, pady=4).pack(side="right")
+
+        self.win.bind("<Escape>", lambda e: self.win.destroy())
+        self.win.bind("<Return>", lambda e: self._save())
+
+        # Center on parent
+        self.win.update_idletasks()
+        mx = master.winfo_rootx() + master.winfo_width() // 2
+        my = master.winfo_rooty() + master.winfo_height() // 2
+        w = self.win.winfo_width()
+        h = self.win.winfo_height()
+        self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
+
+        # Focus the title field
+        try:
+            self._entries["title"].focus_set()
+            self._entries["title"].icursor("end")
+        except Exception:
+            pass
+
+    def _save(self):
+        new_tags = {}
+        for key, entry in self._entries.items():
+            try:
+                new_tags[key] = entry.get().strip()
+            except Exception:
+                new_tags[key] = ""
+
+        ok, err = write_tags(self.path, new_tags)
+        if not ok:
+            messagebox.showerror("Tag save failed", err, parent=self.win)
+            return
+
+        # Update playlist entry if this file is in the playlist
+        try:
+            self.app.refresh_playlist_entry_for(self.path)
+        except Exception as e:
+            print(f"[XZN] playlist refresh after tag save failed: {e}")
+
+        self.win.destroy()
+
+
+# ------------------------------------------------------------------------
 class BgPopup:
     def __init__(self, app, x, y):
         self.app = app
@@ -2020,6 +2210,10 @@ class App:
         self._eq_preamp = float(settings.get("eq_preamp") or 0.0)
         self.palette = build_palette(self.accent)
         print(f"[XZN] Accent color: {self.accent}")
+        if _MUTAGEN_AVAILABLE:
+            print("[XZN] Tag editing enabled (mutagen)")
+        else:
+            print("[XZN] Tag editing disabled (pip install mutagen)")
 
         self.events = queue.Queue()
         self.player = Player(self.events)
@@ -2041,6 +2235,7 @@ class App:
         self._hero_resize_job = None
         self._video_win = None
         self._eq_win = None
+        self._tag_win = None
         self._main_frame = None
         self._frame_counter = 0
         self._dnd_widgets = []
@@ -2500,6 +2695,9 @@ class App:
         self.listbox.pack(side="left", fill="both", expand=True)
         self.pl_scale.pack(side="right", fill="y", padx=(2, 0))
         self.listbox.bind("<Double-Button-1>", lambda e: self._play_selected())
+        self.listbox.bind("<Button-3>", self._on_playlist_right_click)
+        self.listbox.bind("<Button-2>", self._on_playlist_right_click)
+        self.listbox.bind("<Control-Button-1>", self._on_playlist_right_click)
         self.listbox.bind("<MouseWheel>", self._on_list_mousewheel)
         self.listbox.bind("<Button-4>", self._on_list_mousewheel)
         self.listbox.bind("<Button-5>", self._on_list_mousewheel)
@@ -2535,6 +2733,141 @@ class App:
         except Exception:
             pass
         return "break"
+
+    # --- Playlist right-click (tag editor) ------------------------------
+    def _on_playlist_right_click(self, event):
+        """Show a small popup with 'Edit tags…' for the clicked entry."""
+        try:
+            index = self.listbox.nearest(event.y)
+        except Exception:
+            return
+
+        if not (0 <= index < len(self.playlist)):
+            return
+
+        # Select the clicked entry so the menu "feels" connected
+        try:
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(index)
+        except Exception:
+            pass
+
+        path = self.playlist[index]
+        can_edit = is_taggable_audio(path) and _MUTAGEN_AVAILABLE
+
+        # Build a small borderless popup (matches the app style)
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        p = self.palette
+        popup.configure(bg=p["ACCENT_LO"])
+        try:
+            popup.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        inner = tk.Frame(popup, bg=p["RAISED"], bd=0, highlightthickness=0)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        item = tk.Label(
+            inner,
+            text="Edit tags…",
+            font=FONT_UI,
+            bg=p["RAISED"],
+            fg=p["WHITE"] if can_edit else p["GRAY"],
+            anchor="w", padx=14, pady=6,
+            cursor="hand2" if can_edit else "arrow",
+        )
+        item.pack(fill="x")
+
+        if can_edit:
+            item.bind("<Enter>", lambda e: item.config(bg=p["ACCENT"], fg=p["WHITE"]))
+            item.bind("<Leave>", lambda e: item.config(bg=p["RAISED"], fg=p["WHITE"]))
+            item.bind("<Button-1>",
+                      lambda e: (popup.destroy(), self.open_tag_editor(path)))
+        else:
+            # Explain why it's greyed out
+            if not _MUTAGEN_AVAILABLE:
+                item.config(text="Edit tags… (mutagen missing)")
+            elif not is_taggable_audio(path):
+                item.config(text="Edit tags… (format not supported)")
+
+        x = event.x_root
+        y = event.y_root
+        popup.geometry(f"+{x}+{y}")
+
+        def _close(_e=None):
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+
+        popup.bind("<FocusOut>", _close)
+        popup.bind("<Escape>", _close)
+        try:
+            popup.focus_set()
+        except Exception:
+            pass
+
+        # Close on click outside
+        bind_id = self.root.bind_all("<Button-1>",
+                                     lambda e: _maybe_close_outside(e, popup),
+                                     add="+")
+        popup._xzn_bind_id = bind_id
+
+    def open_tag_editor(self, path):
+        """Open the tag editor for the given file path."""
+        try:
+            if self._tag_win is not None and self._tag_win.win.winfo_exists():
+                # Bring existing one to front and close it first
+                try:
+                    self._tag_win.win.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._tag_win = TagEditorWindow(self.root, self, path)
+        except Exception as e:
+            print(f"[XZN] Tag editor failed: {e}")
+            messagebox.showerror("Tag editor",
+                                 f"Could not open tag editor:\n{e}")
+
+    def refresh_playlist_entry_for(self, path):
+        """
+        After tags have been changed, re-read the file's meta and update
+        the playlist line (title/artist) for the given path.
+        """
+        try:
+            idx = self.playlist.index(path)
+        except ValueError:
+            return
+
+        new_name = os.path.basename(path)
+        try:
+            tags = read_tags(path)
+            t = tags.get("title", "")
+            a = tags.get("artist", "")
+            if t and a:
+                new_name = f"{a} - {t}"
+            elif t:
+                new_name = t
+        except Exception:
+            pass
+
+        try:
+            self.listbox.delete(idx)
+            self.listbox.insert(idx, new_name)
+            self.listbox.selection_set(idx)
+        except Exception:
+            pass
+
+        # If this is the currently playing file, update the title text too
+        if self.current_index == idx:
+            try:
+                if self.player.current_path == path:
+                    self.player.title_text = new_name
+            except Exception:
+                pass
 
     # --- Playlist reorder -----------------------------------------------
     def move_up(self):
@@ -3218,12 +3551,37 @@ class App:
                 self._eq_win.win.destroy()
         except Exception:
             pass
+        try:
+            if self._tag_win is not None and self._tag_win.win.winfo_exists():
+                self._tag_win.win.destroy()
+        except Exception:
+            pass
         self.root.destroy()
 
     def run(self):
         self._tick_fast()
         self._tick_mid()
         self.root.mainloop()
+
+
+def _maybe_close_outside(event, popup):
+    """Helper: close the tag-edit context popup when clicking elsewhere."""
+    try:
+        w = popup.winfo_containing(event.x_root, event.y_root)
+    except Exception:
+        w = None
+    p = w
+    while p is not None:
+        if p is popup:
+            return
+        try:
+            p = p.master
+        except Exception:
+            p = None
+    try:
+        popup.destroy()
+    except Exception:
+        pass
 
 
 def main():
