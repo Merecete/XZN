@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR (macOS) v1.1
+XZN-CDR (macOS) v1.3
 ====================
 Companion tool for Xenon Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -14,6 +14,13 @@ No pycdio, no libcdio headers, no C compilation.
 
 Requirements:
     brew install libcdio-paranoia ffmpeg
+
+v1.2:
+- macOS menu cleaned up (no File/Edit/Window/Help)
+- About entry opens the custom Info window
+v1.3:
+- Drive entry no longer has a light focus ring
+- Format / Bitrate dropdowns now match the dark theme
 
 Copyright (c) 2026 Merecete
 Released under the MIT License. See LICENSE file for details.
@@ -39,14 +46,16 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
 
+# --- Platform detection -------------------------------------------------
+IS_MAC = (sys.platform == "darwin")
+IS_WINDOWS = (sys.platform == "win32")
+
 AUDIO_SAMPLE_RATE = 44100
 AUDIO_CHANNELS = 2
 AUDIO_BYTES_PER_SAMPLE = 2
 CD_SECTORS_PER_SECOND = 75
 CD_FRAME_SIZE = 2352
 
-# The Homebrew package is "libcdio-paranoia", and it provides the
-# executable "cd-paranoia" (with a hyphen).
 CDPARANOIA_BIN = "cd-paranoia"
 CDPARANOIA_PKG = "libcdio-paranoia"
 
@@ -109,7 +118,6 @@ def find_ffmpeg() -> Optional[str]:
 
 
 def find_cdparanoia() -> Optional[str]:
-    """Return the path to cd-paranoia, or None if not installed."""
     return shutil.which(CDPARANOIA_BIN)
 
 
@@ -214,7 +222,6 @@ def build_palette(accent_hex):
 
 
 def _suggest_default_drive() -> Optional[str]:
-    """Return a reasonable default CD device path on macOS."""
     for dev in ("/dev/disk2", "/dev/disk4", "/dev/disk1", "/dev/disk3"):
         if os.path.exists(dev):
             return dev
@@ -287,13 +294,150 @@ def _safe_unlink(path):
 
 
 # ------------------------------------------------------------------------
+# Custom flat dropdown for macOS
+# ------------------------------------------------------------------------
+class FlatOptionMenu:
+    """
+    macOS-friendly replacement for tk.OptionMenu.
+
+    The native OptionMenu ignores bg/fg on macOS Aqua theme.
+    This widget uses a Label + borderless Toplevel popup instead,
+    matching the app's color scheme.
+    """
+
+    def __init__(self, parent, var, options, palette, width=8, on_change=None):
+        self.palette = palette
+        self.var = var
+        self.options = list(options)
+        self.on_change = on_change
+        self._popup = None
+
+        bg_color = palette["RAISED"]
+        fg_color = palette["WHITE"]
+
+        self.btn = tk.Label(
+            parent,
+            text=var.get(),
+            bg=bg_color, fg=fg_color,
+            font=FONT_UI_B, padx=8, pady=3,
+            relief="raised", bd=1, cursor="hand2",
+            width=width, anchor="w",
+        )
+        self.btn.bind("<Button-1>", self._open)
+        self.btn.bind("<Enter>", lambda e: self.btn.config(bg=lighten(bg_color, 0.15)))
+        self.btn.bind("<Leave>", lambda e: self.btn.config(bg=bg_color))
+
+        # Keep the label text in sync if the variable changes elsewhere
+        try:
+            self.var.trace_add("write", lambda *a: self._update_text())
+        except Exception:
+            # Older Tk versions
+            try:
+                self.var.trace("w", lambda *a: self._update_text())
+            except Exception:
+                pass
+
+    def _update_text(self):
+        try:
+            self.btn.config(text=self.var.get())
+        except Exception:
+            pass
+
+    def grid(self, **kwargs):
+        self.btn.grid(**kwargs)
+        return self
+
+    def pack(self, **kwargs):
+        self.btn.pack(**kwargs)
+        return self
+
+    def _open(self, event=None):
+        if self._popup is not None:
+            return
+        p = self.palette
+
+        self._popup = tk.Toplevel(self.btn)
+        self._popup.overrideredirect(True)
+        self._popup.configure(bg=p["ACCENT_LO"])
+        try:
+            self._popup.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        inner = tk.Frame(self._popup, bg=p["RAISED"], bd=0, highlightthickness=0)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        for opt in self.options:
+            item = tk.Label(
+                inner, text=opt, font=FONT_UI,
+                bg=p["RAISED"], fg=p["WHITE"],
+                anchor="w", padx=14, pady=4, cursor="hand2",
+            )
+            item.pack(fill="x")
+            item.bind("<Enter>", lambda e, w=item: w.config(bg=p["ACCENT"], fg=p["WHITE"]))
+            item.bind("<Leave>", lambda e, w=item: w.config(bg=p["RAISED"], fg=p["WHITE"]))
+            item.bind("<Button-1>", lambda e, o=opt: self._select(o))
+
+        x = self.btn.winfo_rootx()
+        y = self.btn.winfo_rooty() + self.btn.winfo_height()
+        self._popup.geometry(f"+{x}+{y}")
+
+        try:
+            self._popup.focus_set()
+        except Exception:
+            pass
+
+        self._popup.bind("<FocusOut>", lambda e: self._close())
+        self._popup.bind("<Escape>", lambda e: self._close())
+        self.btn.bind_all("<Button-1>", self._on_global_click, add="+")
+
+    def _on_global_click(self, event):
+        if self._popup is None:
+            return
+        try:
+            w = self.btn.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        p = w
+        while p is not None:
+            if p is self._popup:
+                return
+            try:
+                p = p.master
+            except Exception:
+                p = None
+        self._close()
+
+    def _select(self, value):
+        try:
+            self.var.set(value)
+        except Exception:
+            pass
+        if self.on_change is not None:
+            try:
+                self.on_change(value)
+            except Exception:
+                pass
+        self._close()
+
+    def _close(self):
+        if self._popup is None:
+            return
+        try:
+            self.btn.unbind_all("<Button-1>")
+        except Exception:
+            pass
+        try:
+            self._popup.destroy()
+        except Exception:
+            pass
+        self._popup = None
+
+
+# ------------------------------------------------------------------------
 # cd-paranoia helpers (macOS backend)
 # ------------------------------------------------------------------------
 def cdparanoia_list_tracks(device: str) -> List[Tuple[int, float]]:
-    """
-    Query the CD TOC using `cd-paranoia -Q`.
-    Returns a list of (track_number, duration_seconds).
-    """
     cdparanoia = find_cdparanoia()
     if not cdparanoia:
         raise RuntimeError(
@@ -315,9 +459,6 @@ def cdparanoia_list_tracks(device: str) -> List[Tuple[int, float]]:
 
     out = result.stdout or ""
 
-    # Parse lines like:
-    #   1.    0:04:02 [00:04:02]        0:00:00 [00:00:00]    no   no  2
-    # The exact spacing can vary, so use a loose regex.
     tracks: List[Tuple[int, float]] = []
     pattern = re.compile(r"^\s*(\d+)\.\s+(\d+):(\d+):(\d+)")
     for line in out.splitlines():
@@ -354,10 +495,6 @@ def cdparanoia_rip_track(device: str, track_no: int, out_wav: str,
                          progress_callback=None,
                          cancel_event=None,
                          duration_sec: float = 0.0) -> None:
-    """
-    Rip a single audio track to a WAV file using cd-paranoia.
-    Progress is estimated from cd-paranoia's stderr output.
-    """
     cdparanoia = find_cdparanoia()
     if not cdparanoia:
         raise RuntimeError(
@@ -365,8 +502,6 @@ def cdparanoia_rip_track(device: str, track_no: int, out_wav: str,
             f"Install it with: brew install {CDPARANOIA_PKG}"
         )
 
-    # cd-paranoia -w <file> <track>   →  writes to <file>
-    # -d <device> specifies the CD device
     cmd = [cdparanoia, "-d", device, "-w", out_wav, str(track_no)]
 
     proc = subprocess.Popen(
@@ -388,7 +523,6 @@ def cdparanoia_rip_track(device: str, track_no: int, out_wav: str,
             if not line:
                 continue
 
-            # Progress lines look like:  "##: 1 [00:23] ???"
             m = re.search(r"\[(\d+):(\d+)\]", line)
             if m and progress_callback and duration_sec > 0:
                 mm = int(m.group(1))
@@ -474,9 +608,6 @@ def _eject_drive(device: str, ui_queue: "queue.Queue"):
 
 
 def rip_worker_mac(job: RipJob, ui_queue: "queue.Queue"):
-    """
-    Rip on macOS using cd-paranoia for reading, ffmpeg for encoding.
-    """
     if not find_cdparanoia():
         ui_queue.put(("error",
                       f"{CDPARANOIA_BIN} not found. "
@@ -737,6 +868,7 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         apply_window_icon(self.root)
+        self._setup_macos_menu()
         self.root.title(APP_NAME)
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
         self.root.minsize(680, 640)
@@ -779,6 +911,26 @@ class App:
 
         self.root.after(100, self._poll_ui_queue)
         self.root.after(200, self._startup_check)
+
+    # --- macOS menu ------------------------------------------------------
+    def _setup_macos_menu(self):
+        if not IS_MAC:
+            return
+        try:
+            menubar = tk.Menu(self.root)
+            self.root.config(menu=menubar)
+            self.root.createcommand(
+                "tk::mac::standardAboutPanel", self._show_mac_about
+            )
+            print("[XZN-CDR] macOS menu customized.")
+        except Exception as e:
+            print(f"[XZN-CDR] macOS menu setup failed: {e}")
+
+    def _show_mac_about(self):
+        try:
+            InfoWindow(self.root, self.palette, self)
+        except Exception as e:
+            print(f"[XZN-CDR] macOS About failed: {e}")
 
     def _mkbtn(self, parent, text, cmd, w=4):
         p = self.palette
@@ -879,35 +1031,34 @@ class App:
 
         tk.Label(opt, text="Drive", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=0, sticky="w", padx=(10, 4), pady=4)
-        self.drive_entry = tk.Entry(opt, width=18, bg=p["SUNKEN"], fg=p["WHITE"],
-                                    insertbackground=p["WHITE"], relief="flat", font=FONT_UI)
+
+        # --- Drive entry inside a dark frame (no macOS focus ring) ------
+        entry_wrap = tk.Frame(opt, bg=p["SUNKEN"], bd=0, highlightthickness=0)
+        entry_wrap.grid(row=0, column=1, sticky="w", pady=4)
+        self.drive_entry = tk.Entry(
+            entry_wrap, width=16,
+            bg=p["SUNKEN"], fg=p["WHITE"],
+            insertbackground=p["WHITE"],
+            relief="flat", bd=0, highlightthickness=0,
+            font=FONT_UI,
+        )
+        self.drive_entry.pack(padx=6, pady=3)
         self.drive_entry.insert(0, self.current_drive)
-        self.drive_entry.grid(row=0, column=1, sticky="w", pady=4)
 
         self._mkbtn(opt, "SCAN", self.scan_drive, w=6).grid(row=0, column=2, padx=(6, 0), pady=4)
 
         tk.Label(opt, text="Format", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=3, sticky="w", padx=(20, 4), pady=4)
-        fmt_menu = tk.OptionMenu(opt, self.format_var, "MP3", "OGG", "FLAC", "WAV")
-        fmt_menu.config(bg=p["RAISED"], fg=p["WHITE"],
-                        activebackground=p["ACCENT"], activeforeground=p["WHITE"],
-                        highlightthickness=0, bd=1, relief="raised",
-                        font=FONT_UI_B, width=6)
-        fmt_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
-                                activebackground=p["ACCENT"],
-                                activeforeground=p["WHITE"], font=FONT_UI)
+        fmt_menu = FlatOptionMenu(opt, self.format_var,
+                                  ["MP3", "OGG", "FLAC", "WAV"],
+                                  palette=p, width=6)
         fmt_menu.grid(row=0, column=4, sticky="w", pady=4)
 
         tk.Label(opt, text="Bitrate", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=5, sticky="w", padx=(20, 4), pady=4)
-        bit_menu = tk.OptionMenu(opt, self.bitrate_var, "128", "192", "256", "320")
-        bit_menu.config(bg=p["RAISED"], fg=p["WHITE"],
-                        activebackground=p["ACCENT"], activeforeground=p["WHITE"],
-                        highlightthickness=0, bd=1, relief="raised",
-                        font=FONT_UI_B, width=5)
-        bit_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
-                                activebackground=p["ACCENT"],
-                                activeforeground=p["WHITE"], font=FONT_UI)
+        bit_menu = FlatOptionMenu(opt, self.bitrate_var,
+                                  ["128", "192", "256", "320"],
+                                  palette=p, width=5)
         bit_menu.grid(row=0, column=6, sticky="w", pady=4)
 
         tk.Checkbutton(opt, text="Eject when done", variable=self.eject_var,
