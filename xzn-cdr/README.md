@@ -42,10 +42,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # macOS:
-does not need requirements.txt. It uses only
-Python's standard library plus twp external command-line tools:
-
-Install both once via Homebrew:
+Skip the pip install. The macOS version uses only Python's standard library.
+Install these two tools once via Homebrew instead::
 
 brew install libcdio-paranoia ffmpeg
 
