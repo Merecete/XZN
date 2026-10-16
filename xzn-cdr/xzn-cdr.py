@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.0
+XZN-CDR v1.1
 ============
-Companion tool for Xenon Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
+Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
 - Windows: reads audio CD via `ffmpeg -f libcdio` (single dependency)
 - Linux/macOS: reads audio CD via pycdio (libcdio Python bindings)
@@ -16,6 +16,8 @@ Companion tool for Xenon Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 - PyInstaller-ready: bundled ffmpeg is found via sys._MEIPASS
 - Auto-saves settings (~/.xzn_cdr_settings.json)
 
+- v1.1: Logo shown in the Info window (top-left)
+
 Requirements (when running from source):
 - ffmpeg (all platforms, required)
     - On Windows: MUST be a "full" build with libcdio support
@@ -24,6 +26,7 @@ Requirements (when running from source):
 - pycdio (Linux/macOS only, for native CD access)
     - Linux:   sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio
     - macOS:   brew install libcdio && pip install pycdio
+- Pillow (PIL) — for the Info window logo
 
 Requirements (when running as a frozen binary):
 - Nothing external. ffmpeg is bundled inside the executable.
@@ -33,6 +36,7 @@ Bundling:
     before running PyInstaller. Example layout:
         xzn_cdr.py
         xzn.ico
+        xzn-logo.png
         ffmpeg/
             ffmpeg.exe
             ffprobe.exe
@@ -40,6 +44,7 @@ Bundling:
     PyInstaller command:
         pyinstaller --onefile --windowed --icon="xzn.ico"
                     --name="XZN-CDR"
+                    --add-data "xzn-logo.png;."
                     --add-binary "ffmpeg;ffmpeg"
                     xzn_cdr.py
 
@@ -60,9 +65,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
-APP_LONG_NAME = "Xenon Zones CD Ripper"
+APP_LONG_NAME = "Xenon-Zones CD Ripper"
 VERSION = "Alpha 1.0"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
@@ -76,6 +82,7 @@ else:
     ctypes = None
 
 ICON_FILENAME = "xzn.ico"
+LOGO_FILENAME = "xzn-logo.png"
 TASKBAR_APP_ID = "com.katie.xzn.cdripper.1"
 
 # --- pycdio import with graceful fallback (only used on Linux/macOS) ---
@@ -1038,12 +1045,31 @@ class InfoWindow:
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
         frame.pack(fill="both", expand=True)
 
-        tk.Label(frame, text=APP_LONG_NAME.upper(),
+        # --- Logo + Title row ---
+        title_row = tk.Frame(frame, bg=p["PANEL"])
+        title_row.pack(anchor="w", fill="x")
+
+        logo_path = resource_path(LOGO_FILENAME)
+        if os.path.isfile(logo_path):
+            try:
+                logo_img = Image.open(logo_path).convert("RGBA")
+                logo_img = logo_img.resize((64, 64), Image.Resampling.LANCZOS)
+                logo_photo = ImageTk.PhotoImage(logo_img)
+                logo_lbl = tk.Label(title_row, image=logo_photo,
+                                    bg=p["PANEL"], bd=0,
+                                    highlightthickness=0)
+                logo_lbl.image = logo_photo  # keep reference
+                logo_lbl.pack(side="left", padx=(0, 14))
+            except Exception as e:
+                print(f"[XZN-CDR] Info logo load failed: {e}")
+
+        tk.Label(title_row, text=APP_LONG_NAME.upper(),
                  font=("Helvetica", 15, "bold"),
-                 bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+                 bg=p["PANEL"], fg=p["ACCENT"]).pack(side="left", anchor="w")
+
         tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(8, 14))
 
-        tk.Label(frame, text="Companion tool for Xenon Zones.",
+        tk.Label(frame, text="Companion tool for Xenon-Zones.",
                  font=FONT_TAG,
                  bg=p["PANEL"], fg=p["WHITE"],
                  anchor="w", justify="left",
