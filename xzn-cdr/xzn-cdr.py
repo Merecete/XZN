@@ -51,7 +51,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "2.0"
+VERSION = "1.0.0"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
