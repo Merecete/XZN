@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v2.0
-============
+XZN-CDR v1.0.0
+==============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
-Unified codebase — one file, three platforms, three CD backends:
+Features
+--------
+- Rips selected tracks (or the whole disc) from an audio CD
+- Encodes to MP3, OGG, FLAC, or writes WAV directly
+- Bitrate selection for lossy formats (MP3, OGG)
+- STOP button: finished tracks stay on disk, current track is discarded
+- Themed GUI matching Xenon-Zones (accent color, alpha, Info/Theme/License)
+- Auto-saves settings (~/.xzn_cdr_settings.json)
 
-- Windows : ffmpeg -f libcdio   (single dependency: ffmpeg full build)
-- Linux   : pycdio              (libcdio + pycdio packages)
-- macOS   : cd-paranoia         (brew install libcdio-paranoia)
+Platform backends
+-----------------
+The CD-access layer is selected at runtime:
 
-The GUI, theming, alpha handling, stop logic and license window are
-shared across all platforms. Only the CD-access layer differs and is
-selected at runtime by make_backend().
+- Windows : ``ffmpeg -f libcdio``   (requires a full ffmpeg build)
+- Linux   : ``pycdio``              (libcdio + pycdio packages)
+- macOS   : ``cd-paranoia``         (brew install libcdio-paranoia)
 
-Requirements (source):
-- ffmpeg (all platforms, required for encoding)
+Requirements
+------------
+- ffmpeg on all platforms (used for encoding)
     - Windows: MUST be a "full" build with libcdio support
-- Windows: nothing else (ffprobe ships with ffmpeg)
-- Linux:   sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio
-- macOS:   brew install libcdio-paranoia ffmpeg
+- Linux:   ``sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio``
+- macOS:   ``brew install libcdio-paranoia ffmpeg``
 - Pillow (PIL) — for the Info window logo
 
-Bundling (PyInstaller):
-    pyinstaller --onefile --windowed --icon="xzn.ico"
-                --name="XZN-CDR"
-                --add-data "xzn-logo.png;."
-                --add-binary "ffmpeg;ffmpeg"
-                xzn_cdr.py
+Bundling (PyInstaller)
+----------------------
+Example layout before bundling::
+
+    xzn-cdr.py
+    xzn.ico
+    xzn-logo.png
+    ffmpeg/
+        ffmpeg.exe
+        ffprobe.exe
+
+On Windows::
+
+    pyinstaller --onefile --windowed --icon="xzn.ico" ^
+                --name="XZN-CDR" ^
+                --add-data "xzn-logo.png;." ^
+                --add-binary "ffmpeg;ffmpeg" ^
+                xzn-cdr.py
+
+On Linux / macOS, the ``--add-data`` / ``--add-binary`` separators are ``:``
+instead of ``;``.
 
 Copyright (c) 2026 Merecete
 Released under the MIT License. See LICENSE file for details.
