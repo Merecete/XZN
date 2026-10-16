@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon Zones (XZN) v5.0
+Xenon-Zones (XZN) v5.1
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -25,6 +25,7 @@ Xenon Zones (XZN) v5.0
         where Tk's stipple is ignored and the overlay looked cut off)
 - v4.9: EQ preset dropdown now uses FlatOptionMenu (macOS-safe)
 - v5.0: Tag editor via right-click on a playlist entry (mutagen)
+- v5.1: Logo shown in the Info window (top-left)
 
 Copyright (c) 2026 Merecete
 
@@ -77,7 +78,7 @@ except Exception:
     _MUTAGEN_AVAILABLE = False
 
 
-APP_NAME = "Xenon Zones"
+APP_NAME = "Xenon-Zones"
 VERSION = "Alpha 1.0"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
@@ -87,6 +88,7 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
 # --- Icon constants -----------------------------------------------------
 ICON_FILENAME = "xzn.ico"
+LOGO_FILENAME = "xzn-logo.png"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
 
 # --- Default palette (dark bluish purple) -------------------------------
@@ -150,9 +152,10 @@ EQ_PRESETS = {
     "Jazz":      [4, 3, 1, 2, -1, -1, 0, 2, 3, 4],
     "Classical": [4, 3, 2, 0, 0, 0, -2, -3, -3, -4],
     "Bass":      [8, 7, 5, 2, 0, 0, 0, 0, 0, 0],
-    "Treble":    [0, 0, 0, 0, 0, 2, 4, 6, 7, 8],
+    "Treble":    [0, 0, 0, 0, 0, 0, 2, 4, 6, 7, 8],
     "Vocal":     [-2, -1, 2, 4, 5, 4, 2, 0, -1, -2],
 }
+EQ_PRESETS["Treble"] = [0, 0, 0, 0, 0, 2, 4, 6, 7, 8]
 
 
 # ------------------------------------------------------------------------
@@ -1551,9 +1554,27 @@ class InfoWindow:
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
         frame.pack(fill="both", expand=True)
 
-        tk.Label(frame, text="XENON ZONES (XZN)",
+        # --- Logo + Title row ---
+        title_row = tk.Frame(frame, bg=p["PANEL"])
+        title_row.pack(anchor="w", fill="x")
+
+        logo_path = resource_path(LOGO_FILENAME)
+        if os.path.isfile(logo_path):
+            try:
+                logo_img = Image.open(logo_path).convert("RGBA")
+                logo_img = logo_img.resize((64, 64), Image.Resampling.LANCZOS)
+                logo_photo = ImageTk.PhotoImage(logo_img)
+                logo_lbl = tk.Label(title_row, image=logo_photo,
+                                    bg=p["PANEL"], bd=0,
+                                    highlightthickness=0)
+                logo_lbl.image = logo_photo  # keep reference
+                logo_lbl.pack(side="left", padx=(0, 14))
+            except Exception as e:
+                print(f"[XZN] Info logo load failed: {e}")
+
+        tk.Label(title_row, text="XENON-ZONES (XZN)",
                  font=("Helvetica", 15, "bold"),
-                 bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+                 bg=p["PANEL"], fg=p["ACCENT"]).pack(side="left", anchor="w")
 
         tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(8, 14))
 
