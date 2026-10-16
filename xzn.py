@@ -2517,12 +2517,18 @@ def _on_any_click(root_widget, event):
         clicked = None
 
     for popup in list(reg):
+        # Always remove from the registry, even if it is already gone.
         try:
             if not popup.winfo_exists():
                 reg.discard(popup)
                 continue
-            # Walk up the widget tree from the click target, looking for
-            # the popup window itself.
+        except Exception:
+            reg.discard(popup)
+            continue
+
+        # Walk up the widget tree from the click target, looking for
+        # the popup window itself.
+        try:
             p = clicked
             inside = False
             while p is not None:
@@ -2600,10 +2606,17 @@ class BgPopup:
             pass
 
     def _choose(self):
+        # Clear the app's pointer *before* opening the file dialog so a
+        # subsequent BG click can open a fresh popup immediately, even
+        # while the dialog is still running.
+        if getattr(self.app, "_bg_popup", None) is self:
+            self.app._bg_popup = None
         self.close()
         self.app.choose_bg()
 
     def _remove(self):
+        if getattr(self.app, "_bg_popup", None) is self:
+            self.app._bg_popup = None
         self.close()
         self.app.remove_bg()
 
@@ -2611,7 +2624,12 @@ class BgPopup:
         if self._destroyed:
             return
         self._destroyed = True
-        unregister_popup(self.app.root, self.win)
+        # Unregister first so the click handler never sees a half-dead
+        # popup.
+        try:
+            unregister_popup(self.app.root, self.win)
+        except Exception:
+            pass
         try:
             self.win.destroy()
         except Exception:
@@ -3471,7 +3489,14 @@ class App:
 
     # --- BG popup --------------------------------------------------------
     def _bg_menu(self):
-        self._close_bg_popup()
+        """
+        Open a fresh BG popup.
+
+        We do NOT attempt to clean up a previous popup here — the global
+        click handler and the FocusOut binding already closed it as part
+        of the same click that reached this method. Just create the new
+        one.
+        """
         try:
             x = self.btn_bg.winfo_rootx()
             y = self.btn_bg.winfo_rooty() + self.btn_bg.winfo_height()
@@ -3481,13 +3506,18 @@ class App:
         self._bg_popup = BgPopup(self, x, y)
 
     def _close_bg_popup(self):
+        """
+        Force-close the current BG popup if any.
+        Clear the app-side reference *first* so nothing can leave a
+        stale pointer behind, even if popup.close() raises.
+        """
         popup = getattr(self, "_bg_popup", None)
+        self._bg_popup = None
         if popup is not None:
             try:
                 popup.close()
             except Exception:
                 pass
-            self._bg_popup = None
 
     def remove_bg(self):
         had_bg = bool(self._bg_path)
