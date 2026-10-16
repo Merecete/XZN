@@ -16,9 +16,20 @@ to MP3 / OGG / FLAC / WAV, with the same look like XZN.
 ## Requirements
 
 - Python 3.10+
-- **Windows:** [ffmpeg (full build)](https://www.gyan.dev/ffmpeg/builds/) with `libcdio` support
-- **Linux:** `ffmpeg` and `libcdio` development packages (see Installation below)
-- **macOS:** `cd-paranoia` and `ffmpeg` via Homebrew (see Installation below)
+- **ffmpeg** on every platform (used for encoding to MP3 / OGG / FLAC)
+    - **Windows:** must be a **full** build with `libcdio` support
+      (e.g. [ffmpeg-release-full from gyan.dev](https://www.gyan.dev/ffmpeg/builds/))
+    - **Linux / macOS:** any recent build from your package manager is fine
+- **Pillow** (for the Info window logo) — installed via `requirements.txt`
+
+## CD backend per platform
+
+The ripper picks the right backend at runtime, so there's a single
+`xzn-cdr.py` for all platforms:
+
+Windows: `ffmpeg -f libcdio` | just the ffmpeg full build above  
+Linux: Linux `pycdio` | libcdio-dev`, `libcdio-cdda-dev` then `pip install -r requirements.txt`
+Mac: `cd-paranoia` | `brew install libcdio-paranoia ffmpeg`
 
 ## Installation
 
@@ -38,15 +49,8 @@ python3 -m venv .venv
 # Linux/macOS:
 source .venv/bin/activate
 
-# Windows/Linux:
-pip install -r requirements.txt
-
 # macOS:
-Skip the pip install. The macOS version uses only Python's standard library.
-Install these two tools once via Homebrew instead::
+Install the two native tools via Homebrew: brew install libcdio-paranoia ffmpeg
+( if you don't have Homebrew: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" )
 
-brew install libcdio-paranoia ffmpeg
-
-If you don't have Homebrew:
-
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+pip install -r requirements.txt
