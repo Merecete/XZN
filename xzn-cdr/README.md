@@ -66,7 +66,7 @@ cd Xenon-Zones/xzn-cdr
 
 Install the two native tools via Homebrew: brew install libcdio-paranoia ffmpeg
 if you don't have Homebrew:
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" )
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 python3 -m venv .venv
 
