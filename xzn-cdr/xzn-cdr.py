@@ -65,7 +65,7 @@ import threading
 import subprocess
 import traceback
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -490,6 +490,7 @@ def _safe_unlink(path):
 class RipJob:
     tracks: List[int]
     track_durations: List[float]
+    track_starts: List[float]
     outdir: str
     fmt: str
     bitrate: str
@@ -546,6 +547,7 @@ class CDBackend:
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  start_sec: float = 0.0,
                   bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
@@ -557,6 +559,8 @@ class CDBackend:
         - honouring cancel_event (raise CancelledError)
         - honouring is_last_track (avoid end-of-disc hang)
         - honouring the requested bitrate for lossy formats
+        - using start_sec as the offset from the beginning of the disc
+          (only relevant for backends that read the whole disc as one stream)
         """
         raise NotImplementedError
 
@@ -645,20 +649,11 @@ class FFmpegBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  start_sec: float = 0.0,
                   bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
-
-        # For the Windows ffmpeg backend we need the track's start time
-        # on the disc — reconstruct it here by querying the TOC once more.
-        all_tracks = self.list_tracks(drive)
-        starts = {}
-        acc = 0.0
-        for i, (tn, dur) in enumerate(all_tracks):
-            starts[tn] = acc
-            acc += dur
-        start_sec = starts.get(track_no, 0.0)
 
         effective_duration = duration_sec
         if is_last_track:
@@ -877,12 +872,16 @@ class PyCdioBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  start_sec: float = 0.0,
                   bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
         if not _PYCDIO_AVAILABLE:
             raise RuntimeError("pycdio is not available.")
+
+        # start_sec is not needed here: pycdio addresses tracks directly
+        # via the TOC, so we ignore the parameter.
 
         fmt = self._infer_format(out_path)
         tmpdir = os.path.dirname(out_path) or "."
@@ -1048,6 +1047,7 @@ class CdParanoiaBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  start_sec: float = 0.0,
                   bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
@@ -1058,6 +1058,9 @@ class CdParanoiaBackend(CDBackend):
                 f"{CDPARANOIA_BIN} not found. "
                 f"Install it with: brew install {CDPARANOIA_PKG}"
             )
+
+        # start_sec is not needed here: cd-paranoia addresses tracks
+        # directly by number, so we ignore the parameter.
 
         fmt = PyCdioBackend._infer_format(out_path)
         tmpdir = os.path.dirname(out_path) or "."
@@ -1187,8 +1190,8 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
 
     ripped = 0
     try:
-        for idx, (track_no, duration_sec) in enumerate(
-            zip(job.tracks, job.track_durations), start=1
+        for idx, (track_no, duration_sec, start_sec) in enumerate(
+            zip(job.tracks, job.track_durations, job.track_starts), start=1
         ):
             if job.is_cancelled():
                 ui_queue.put(("stopped", f"Stopped after {ripped} track(s)."))
@@ -1212,6 +1215,7 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
                     track_no,
                     out_path,
                     duration_sec,
+                    start_sec=start_sec,
                     bitrate=job.bitrate,
                     progress_callback=progress_cb,
                     cancel_event=job.cancel_event,
@@ -2289,14 +2293,24 @@ class App:
         if not self._ensure_ready(selected_tracks):
             return
 
-        track_ids = [t[0] for t in selected_tracks]
-        durations = [t[1] for t in selected_tracks]
+        # Compute track start offsets (seconds from start of disc) once,
+        # so backends like FFmpeg don't have to query the TOC per track.
+        track_ids: List[int] = []
+        durations: List[float] = []
+        starts: List[float] = []
+        acc = 0.0
+        for track_no, dur in selected_tracks:
+            track_ids.append(track_no)
+            durations.append(dur)
+            starts.append(acc)
+            acc += dur
 
         self._cancel_event = threading.Event()
 
         job = RipJob(
             tracks=track_ids,
             track_durations=durations,
+            track_starts=starts,
             outdir=self.current_outdir,
             fmt=self.format_var.get(),
             bitrate=self.bitrate_var.get(),
