@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR (macOS) v1.4
+XZN-CDR (macOS) v1.5
 ====================
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -24,6 +24,10 @@ v1.3:
 - Format / Bitrate dropdowns now match the dark theme
 v1.4:
 - Logo shown in the Info window (top-left)
+v1.5:
+- MIT License window with full alpha transparency support
+- Dialog buttons (Info / Theme / License) now use the smaller
+  Helvetica font, matching xzn.py's dialog style
 
 Copyright (c) 2026 Merecete
 Released under the MIT License. See LICENSE file for details.
@@ -63,6 +67,30 @@ CD_FRAME_SIZE = 2352
 
 CDPARANOIA_BIN = "cd-paranoia"
 CDPARANOIA_PKG = "libcdio-paranoia"
+
+# --- Full MIT license text (for the Info window button) -----------------
+MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) 2026 Merecete
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
 
 
 # ------------------------------------------------------------------------
@@ -224,6 +252,36 @@ def build_palette(accent_hex):
         "WHITE":     "#ece9f5" if not is_light else "#1a1a2a",
         "ERR":       "#ff8fa3",
     }
+
+
+def make_flat_button(parent, text, cmd, palette, width=None,
+                     bg=None, fg=None, font=None, padx=14, pady=4):
+    """
+    Cross-platform button that respects bg/fg on macOS too.
+    Uses the smaller dialog font (FONT_UI_B) by default — this is the
+    same button style XZN uses in its Info / Theme / License windows.
+    """
+    bg_color = bg if bg is not None else palette["RAISED"]
+    fg_color = fg if fg is not None else palette["WHITE"]
+    font_use = font if font is not None else FONT_UI_B
+
+    if IS_MAC or not IS_WINDOWS:
+        lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                       font=font_use, padx=padx, pady=pady,
+                       relief="raised", bd=1, cursor="hand2")
+        lbl.bind("<Button-1>", lambda e: cmd())
+        lbl.bind("<Enter>", lambda e: lbl.config(bg=lighten(bg_color, 0.15)))
+        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+        return lbl
+    else:
+        kw = dict(text=text, command=cmd, bg=bg_color, fg=fg_color,
+                  activebackground=lighten(bg_color, 0.15),
+                  activeforeground=fg_color,
+                  relief="raised", bd=1, font=font_use,
+                  padx=padx, pady=pady, takefocus=0)
+        if width is not None:
+            kw["width"] = width
+        return tk.Button(parent, **kw)
 
 
 def _suggest_default_drive() -> Optional[str]:
@@ -739,6 +797,120 @@ def rip_worker_mac(job: RipJob, ui_queue: "queue.Queue"):
 
 
 # ------------------------------------------------------------------------
+# License window (full MIT text) — same look & alpha behavior as XZN
+# ------------------------------------------------------------------------
+def show_license_window(parent, palette, app=None):
+    """
+    Open a small window showing the full MIT license text.
+    Read-only, scrollable, matching the app's look.
+    Registers itself with the app so the alpha slider affects it too.
+    """
+    p = palette
+    win = tk.Toplevel(parent)
+    win.title("License – XZN-CDR")
+    win.configure(bg=p["PANEL"])
+    win.geometry("620x520")
+    win.minsize(400, 300)
+    win.transient(parent)
+    apply_window_icon(win)
+
+    # --- Close handler that also unregisters the window -----------------
+    def _close():
+        if app is not None:
+            try:
+                if win in app._extra_alpha_windows:
+                    app._extra_alpha_windows.remove(win)
+            except Exception:
+                pass
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    win.protocol("WM_DELETE_WINDOW", _close)
+
+    # Footer FIRST, packed at the bottom, so it is always visible
+    footer = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    footer.pack(side="bottom", fill="x")
+
+    make_flat_button(footer, "Close", _close, palette=p,
+                     padx=14, pady=4).pack(side="right")
+
+    # Header (top)
+    header = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    header.pack(side="top", fill="x")
+
+    tk.Label(header, text="MIT LICENSE",
+             font=("Helvetica", 12, "bold"),
+             bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+
+    tk.Frame(win, bg=p["ACCENT_LO"], height=1).pack(
+        side="top", fill="x", padx=20
+    )
+
+    # Body (fills the rest)
+    body = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    body.pack(side="top", fill="both", expand=True)
+
+    text_wrap = tk.Frame(body, bg=p["SUNKEN"], bd=0, highlightthickness=0)
+    text_wrap.pack(fill="both", expand=True)
+
+    txt = tk.Text(
+        text_wrap,
+        wrap="word",
+        bg=p["SUNKEN"], fg=p["WHITE"],
+        insertbackground=p["WHITE"],
+        selectbackground=p["ACCENT"],
+        selectforeground=p["WHITE"],
+        relief="flat", bd=0, highlightthickness=0,
+        font=("Courier New", 9),
+        padx=14, pady=12,
+    )
+    txt.pack(side="left", fill="both", expand=True)
+
+    sb = tk.Scrollbar(text_wrap, command=txt.yview,
+                      bg=p["RAISED"], troughcolor=p["SUNKEN"],
+                      activebackground=p["ACCENT"],
+                      relief="flat", bd=0, highlightthickness=0,
+                      width=12)
+    sb.pack(side="right", fill="y")
+    txt.config(yscrollcommand=sb.set)
+
+    txt.insert("1.0", MIT_LICENSE_TEXT)
+    txt.config(state="disabled")
+
+    win.bind("<Escape>", lambda e: _close())
+
+    # Center on parent
+    try:
+        win.update_idletasks()
+        mx = parent.winfo_rootx() + parent.winfo_width() // 2
+        my = parent.winfo_rooty() + parent.winfo_height() // 2
+        w = win.winfo_width()
+        h = win.winfo_height()
+        win.geometry(f"+{mx - w // 2}+{my - h // 2}")
+    except Exception:
+        pass
+
+    # Register with the app so it participates in the alpha system,
+    # then apply the current alpha immediately.
+    if app is not None:
+        try:
+            app._extra_alpha_windows.append(win)
+        except Exception:
+            pass
+        try:
+            win.after(30, app._apply_alpha_to_windows)
+        except Exception:
+            pass
+
+    try:
+        win.focus_set()
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------------
 # Theme + Info windows
 # ------------------------------------------------------------------------
 class ThemeWindow:
@@ -782,8 +954,10 @@ class ThemeWindow:
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(fill="x", pady=(14, 0))
 
-        app._mkbtn(btn_row, "Default (Purple)", self._reset, w=14).pack(side="left")
-        app._mkbtn(btn_row, "Close", self.win.destroy, w=8).pack(side="right")
+        make_flat_button(btn_row, "Default (Purple)", self._reset,
+                         palette=p, padx=10, pady=4).pack(side="left")
+        make_flat_button(btn_row, "Close", self._close,
+                         palette=p, padx=10, pady=4).pack(side="right")
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -791,25 +965,37 @@ class ThemeWindow:
         w = self.win.winfo_width()
         h = self.win.winfo_height()
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
-        self.win.bind("<Escape>", lambda e: self.win.destroy())
+        self.win.bind("<Escape>", lambda e: self._close())
 
-    def _pick(self, color):
+        # Register with the app for alpha participation
+        try:
+            app._extra_alpha_windows.append(self.win)
+        except Exception:
+            pass
+
+    def _close(self):
+        try:
+            if self.win in self.app._extra_alpha_windows:
+                self.app._extra_alpha_windows.remove(self.win)
+        except Exception:
+            pass
         try:
             self.win.destroy()
         except Exception:
             pass
+
+    def _pick(self, color):
+        self._close()
         self.app.apply_accent(color)
 
     def _reset(self):
-        try:
-            self.win.destroy()
-        except Exception:
-            pass
+        self._close()
         self.app.apply_accent(DEFAULT_PALETTE["ACCENT"])
 
 
 class InfoWindow:
     def __init__(self, master, palette, app):
+        self.app = app
         self.win = tk.Toplevel(master)
         self.win.title("Info – XZN-CDR")
         self.win.configure(bg=palette["PANEL"])
@@ -873,8 +1059,23 @@ class InfoWindow:
         tk.Label(frame, text="Released under the MIT License.",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
-        close_btn = app._mkbtn(frame, "Close", self.win.destroy, w=8)
-        close_btn.pack(anchor="e")
+        # --- Button row: License + Close ---
+        btn_row = tk.Frame(frame, bg=p["PANEL"])
+        btn_row.pack(anchor="e", fill="x")
+
+        make_flat_button(
+            btn_row, "License",
+            lambda: show_license_window(self.win, p, app),
+            palette=p, padx=10, pady=4
+        ).pack(side="left")
+
+        make_flat_button(
+            btn_row, "Close", self._close,
+            palette=p, padx=14, pady=4
+        ).pack(side="right")
+
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self.win.bind("<Escape>", lambda e: self._close())
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -882,7 +1083,23 @@ class InfoWindow:
         w = self.win.winfo_width()
         h = self.win.winfo_height()
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
-        self.win.bind("<Escape>", lambda e: self.win.destroy())
+
+        # Register with the app for alpha participation
+        try:
+            app._extra_alpha_windows.append(self.win)
+        except Exception:
+            pass
+
+    def _close(self):
+        try:
+            if self.win in self.app._extra_alpha_windows:
+                self.app._extra_alpha_windows.remove(self.win)
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------------
@@ -923,6 +1140,10 @@ class App:
         self._progress_value = 0.0
         self._progress_label = ""
 
+        # Registry for toplevels that follow the main window's alpha
+        # (used for Info, Theme and License windows)
+        self._extra_alpha_windows: List[tk.Toplevel] = []
+
         self._build_ui()
 
         try:
@@ -952,11 +1173,12 @@ class App:
 
     def _show_mac_about(self):
         try:
-            InfoWindow(self.root, self.palette, self)
+            self.show_info()
         except Exception as e:
             print(f"[XZN-CDR] macOS About failed: {e}")
 
     def _mkbtn(self, parent, text, cmd, w=4):
+        """Main-window button style (big Courier font)."""
         p = self.palette
         bg_color = p["RAISED"]
         fg_color = p["WHITE"]
@@ -1197,19 +1419,63 @@ class App:
             pass
 
         self._persist_settings()
+        # Apply alpha to any open Toplevels too
+        self._apply_alpha_to_windows()
 
     def _on_alpha_cmd(self, v):
+        self._apply_alpha_to_windows()
+        self._persist_settings()
+
+    # -- Alpha propagation to all Toplevels ------------------------------
+    def _apply_alpha_to_windows(self):
         try:
-            self.root.attributes("-alpha", float(v) / 100.0)
+            a = float(self.alpha_scale.get()) / 100.0
+        except Exception:
+            a = 1.0
+        a = max(0.0, min(1.0, a))
+
+        try:
+            self.root.attributes("-alpha", a)
         except Exception:
             pass
-        self._persist_settings()
+
+        # Collect all Toplevels recursively, so nested windows like the
+        # License window (child of Info) also get their alpha updated.
+        all_toplevels = []
+
+        def _collect(widget):
+            try:
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Toplevel):
+                        all_toplevels.append(child)
+                    _collect(child)
+            except Exception:
+                pass
+
+        _collect(self.root)
+
+        # Also include explicitly registered extras
+        for w in list(getattr(self, "_extra_alpha_windows", [])):
+            try:
+                if w.winfo_exists() and w not in all_toplevels:
+                    all_toplevels.append(w)
+            except Exception:
+                pass
+
+        for w in all_toplevels:
+            try:
+                if w.winfo_exists():
+                    w.attributes("-alpha", a)
+            except Exception:
+                pass
 
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
+        self._apply_alpha_to_windows()
 
     def show_theme(self):
         ThemeWindow(self.root, self)
+        self._apply_alpha_to_windows()
 
     def _persist_settings(self):
         state = {
