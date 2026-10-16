@@ -92,6 +92,14 @@ LAST_TRACK_SAFETY_MARGIN = 0.5
 CDPARANOIA_BIN = "cd-paranoia"
 CDPARANOIA_PKG = "libcdio-paranoia"
 
+# --- Bitrate → Vorbis quality mapping for OGG ---------------------------
+OGG_QUALITY_MAP = {
+    "128": "3",
+    "192": "5",
+    "256": "7",
+    "320": "9",
+}
+
 # --- Full MIT license text ----------------------------------------------
 MIT_LICENSE_TEXT = """MIT License
 
@@ -466,18 +474,24 @@ class RipJob:
         return self.cancel_event is not None and self.cancel_event.is_set()
 
 
-def build_ffmpeg_args(job: RipJob, wav_path: str, out_path: str) -> List[str]:
-    args = [job.ffmpeg or "ffmpeg", "-y", "-i", wav_path]
-    if job.fmt == "MP3":
-        args += ["-codec:a", "libmp3lame", "-b:a", f"{job.bitrate}k"]
-    elif job.fmt == "OGG":
-        q = {"128": "3", "192": "5", "256": "7", "320": "9"}.get(job.bitrate, "6")
+def encode_args_for_ffmpeg(ffmpeg: str, fmt: str, bitrate: str,
+                           wav_in: str, out: str) -> List[str]:
+    """
+    Build a ffmpeg command line for encoding a WAV file to the target format.
+    `bitrate` is a string like "128", "192", "256" or "320" (kbit/s).
+    For OGG it is mapped to the corresponding Vorbis quality value.
+    """
+    args = [ffmpeg, "-y", "-i", wav_in]
+    if fmt == "MP3":
+        args += ["-codec:a", "libmp3lame", "-b:a", f"{bitrate}k"]
+    elif fmt == "OGG":
+        q = OGG_QUALITY_MAP.get(str(bitrate), "6")
         args += ["-codec:a", "libvorbis", "-qscale:a", q]
-    elif job.fmt == "FLAC":
+    elif fmt == "FLAC":
         args += ["-codec:a", "flac", "-compression_level", "5"]
-    elif job.fmt == "WAV":
+    elif fmt == "WAV":
         args += ["-codec:a", "pcm_s16le"]
-    args += [out_path]
+    args += [out]
     return args
 
 
@@ -496,6 +510,7 @@ class CDBackend:
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
@@ -505,6 +520,7 @@ class CDBackend:
         - encoding to the target format (or writing WAV directly)
         - honouring cancel_event (raise CancelledError)
         - honouring is_last_track (avoid end-of-disc hang)
+        - honouring the requested bitrate for lossy formats
         """
         raise NotImplementedError
 
@@ -593,13 +609,13 @@ class FFmpegBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
 
         # For the Windows ffmpeg backend we need the track's start time
-        # on the disc — the caller passes it as part of the duration list,
-        # but we reconstruct it here by querying the TOC once more.
+        # on the disc — reconstruct it here by querying the TOC once more.
         all_tracks = self.list_tracks(drive)
         starts = {}
         acc = 0.0
@@ -617,11 +633,12 @@ class FFmpegBackend(CDBackend):
 
         ext = os.path.splitext(out_path)[1].lower()
         if ext == ".mp3":
-            codec_args = ["-c:a", "libmp3lame"]
+            codec_args = ["-c:a", "libmp3lame", "-b:a", f"{bitrate}k"]
         elif ext == ".ogg":
-            codec_args = ["-c:a", "libvorbis"]
+            q = OGG_QUALITY_MAP.get(str(bitrate), "6")
+            codec_args = ["-c:a", "libvorbis", "-qscale:a", q]
         elif ext == ".flac":
-            codec_args = ["-c:a", "flac"]
+            codec_args = ["-c:a", "flac", "-compression_level", "5"]
         elif ext == ".wav":
             codec_args = ["-c:a", "pcm_s16le"]
         else:
@@ -820,6 +837,7 @@ class PyCdioBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
@@ -865,7 +883,7 @@ class PyCdioBackend(CDBackend):
             _safe_unlink(wav_path)
             raise RuntimeError("ffmpeg not found — required for MP3/OGG/FLAC.")
 
-        args = self._build_encode_args(ffmpeg, fmt, wav_path, out_path)
+        args = encode_args_for_ffmpeg(ffmpeg, fmt, bitrate, wav_path, out_path)
         proc = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
@@ -901,18 +919,6 @@ class PyCdioBackend(CDBackend):
         return {".mp3": "MP3", ".ogg": "OGG", ".flac": "FLAC", ".wav": "WAV"}.get(
             ext, "MP3"
         )
-
-    @staticmethod
-    def _build_encode_args(ffmpeg: str, fmt: str, wav_in: str, out: str) -> List[str]:
-        args = [ffmpeg, "-y", "-i", wav_in]
-        if fmt == "MP3":
-            args += ["-codec:a", "libmp3lame", "-b:a", "320k"]
-        elif fmt == "OGG":
-            args += ["-codec:a", "libvorbis", "-qscale:a", "6"]
-        elif fmt == "FLAC":
-            args += ["-codec:a", "flac", "-compression_level", "5"]
-        args += [out]
-        return args
 
     def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
         try:
@@ -1002,6 +1008,7 @@ class CdParanoiaBackend(CDBackend):
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
                   duration_sec: float,
+                  bitrate: str = "320",
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
@@ -1073,8 +1080,8 @@ class CdParanoiaBackend(CDBackend):
             _safe_unlink(wav_path)
             raise RuntimeError("ffmpeg not found — required for MP3/OGG/FLAC.")
 
-        args = PyCdioBackend._build_encode_args(
-            self.ffmpeg, fmt, wav_path, out_path
+        args = encode_args_for_ffmpeg(
+            self.ffmpeg, fmt, bitrate, wav_path, out_path
         )
         enc = subprocess.Popen(
             args,
@@ -1131,9 +1138,7 @@ def make_backend(ffmpeg: Optional[str], ffprobe: Optional[str]) -> CDBackend:
 # Ripper worker (platform-agnostic)
 # ========================================================================
 def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
-    tmpdir = os.path.join(job.outdir, ".xzn_tmp")
     os.makedirs(job.outdir, exist_ok=True)
-    os.makedirs(tmpdir, exist_ok=True)
 
     total = len(job.tracks)
     if total == 0:
@@ -1167,6 +1172,7 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
                     track_no,
                     out_path,
                     duration_sec,
+                    bitrate=job.bitrate,
                     progress_callback=progress_cb,
                     cancel_event=job.cancel_event,
                     is_last_track=is_last,
@@ -1188,20 +1194,11 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
         if job.eject:
             backend.eject(job.drive, ui_queue)
 
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass
-
         ui_queue.put(("done", f"Finished ripping {total} track(s)."))
 
     except Exception as e:
         traceback.print_exc()
         ui_queue.put(("error", str(e)))
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass
 
 
 # ========================================================================
