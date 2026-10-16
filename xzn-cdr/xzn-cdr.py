@@ -1,55 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.2
+XZN-CDR v2.0
 ============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
-- Windows: reads audio CD via `ffmpeg -f libcdio` (single dependency)
-- Linux/macOS: reads audio CD via pycdio (libcdio Python bindings)
-- Encodes with ffmpeg (MP3, OGG, FLAC) or writes WAV directly
-- Same look & feel as XZN: accent colors, alpha slider, borderless popup
-- Track list with a scrollbar styled like XZN's playlist (tk.Scale)
-- Background rip thread, live progress per track
-- Cancel button to abort a rip cleanly (kills ffmpeg, removes partial file)
-- Fix: last-track hang avoided via -paranoia_mode full + safety margin
-- PyInstaller-ready: bundled ffmpeg is found via sys._MEIPASS
-- Auto-saves settings (~/.xzn_cdr_settings.json)
+Unified codebase — one file, three platforms, three CD backends:
 
-- v1.1: Logo shown in the Info window (top-left)
-- v1.2: MIT License window with full alpha transparency support
-        Dialog buttons (Info / Theme / License) now use the smaller
-        Helvetica font, matching xzn.py's dialog style
+- Windows : ffmpeg -f libcdio   (single dependency: ffmpeg full build)
+- Linux   : pycdio              (libcdio + pycdio packages)
+- macOS   : cd-paranoia         (brew install libcdio-paranoia)
 
-Requirements (when running from source):
-- ffmpeg (all platforms, required)
-    - On Windows: MUST be a "full" build with libcdio support
-      (e.g. https://www.gyan.dev/ffmpeg/builds/ -> ffmpeg-release-full)
-    - Test: `ffmpeg -formats | findstr libcdio`
-- pycdio (Linux/macOS only, for native CD access)
-    - Linux:   sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio
-    - macOS:   brew install libcdio && pip install pycdio
+The GUI, theming, alpha handling, cancel logic and license window are
+shared across all platforms. Only the CD-access layer differs and is
+selected at runtime by make_backend().
+
+Requirements (source):
+- ffmpeg (all platforms, required for encoding)
+    - Windows: MUST be a "full" build with libcdio support
+- Windows: nothing else (ffprobe ships with ffmpeg)
+- Linux:   sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio
+- macOS:   brew install libcdio-paranoia ffmpeg
 - Pillow (PIL) — for the Info window logo
 
-Requirements (when running as a frozen binary):
-- Nothing external. ffmpeg is bundled inside the executable.
-
-Bundling:
-    Place `ffmpeg/ffmpeg.exe` and `ffmpeg/ffprobe.exe` next to xzn_cdr.py
-    before running PyInstaller. Example layout:
-        xzn_cdr.py
-        xzn.ico
-        xzn-logo.png
-        ffmpeg/
-            ffmpeg.exe
-            ffprobe.exe
-
-    PyInstaller command:
-        pyinstaller --onefile --windowed --icon="xzn.ico"
-                    --name="XZN-CDR"
-                    --add-data "xzn-logo.png;."
-                    --add-binary "ffmpeg;ffmpeg"
-                    xzn_cdr.py
+Bundling (PyInstaller):
+    pyinstaller --onefile --windowed --icon="xzn.ico"
+                --name="XZN-CDR"
+                --add-data "xzn-logo.png;."
+                --add-binary "ffmpeg;ffmpeg"
+                xzn_cdr.py
 
 Copyright (c) 2026 Merecete
 Released under the MIT License. See LICENSE file for details.
@@ -72,11 +51,19 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "Alpha 1.0"
+VERSION = "2.0"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
-# --- Windows: taskbar icon ----------------------------------------------
-if sys.platform == "win32":
+ICON_FILENAME = "xzn.ico"
+LOGO_FILENAME = "xzn-logo.png"
+TASKBAR_APP_ID = "com.katie.xzn.cdripper.1"
+
+IS_WINDOWS = (sys.platform == "win32")
+IS_MAC = (sys.platform == "darwin")
+IS_LINUX = not IS_WINDOWS and not IS_MAC
+
+# --- Windows taskbar App-ID ---------------------------------------------
+if IS_WINDOWS:
     try:
         import ctypes
     except Exception:
@@ -84,11 +71,28 @@ if sys.platform == "win32":
 else:
     ctypes = None
 
-ICON_FILENAME = "xzn.ico"
-LOGO_FILENAME = "xzn-logo.png"
-TASKBAR_APP_ID = "com.katie.xzn.cdripper.1"
+# --- pycdio import (Linux only, soft-fail everywhere) -------------------
+try:
+    import cdio
+    import pycdio
+    _PYCDIO_AVAILABLE = True
+except Exception:
+    _PYCDIO_AVAILABLE = False
+    cdio = None
+    pycdio = None
 
-# --- Full MIT license text (for the Info window button) -----------------
+# --- Audio CD constants -------------------------------------------------
+AUDIO_SAMPLE_RATE = 44100
+AUDIO_CHANNELS = 2
+AUDIO_BYTES_PER_SAMPLE = 2
+CD_SECTORS_PER_SECOND = 75
+CD_FRAME_SIZE = 2352
+LAST_TRACK_SAFETY_MARGIN = 0.5
+
+CDPARANOIA_BIN = "cd-paranoia"
+CDPARANOIA_PKG = "libcdio-paranoia"
+
+# --- Full MIT license text ----------------------------------------------
 MIT_LICENSE_TEXT = """MIT License
 
 Copyright (c) 2026 Merecete
@@ -112,34 +116,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-# --- pycdio import with graceful fallback (only used on Linux/macOS) ---
-try:
-    import cdio
-    import pycdio
-    _PYCDIO_AVAILABLE = True
-except Exception:
-    _PYCDIO_AVAILABLE = False
-    cdio = None
-    pycdio = None
 
-# ------------------------------------------------------------------------
-# Audio CD constants
-# ------------------------------------------------------------------------
-AUDIO_SAMPLE_RATE = 44100
-AUDIO_CHANNELS = 2
-AUDIO_BYTES_PER_SAMPLE = 2      # 16-bit PCM
-CD_SECTORS_PER_SECOND = 75      # Red Book standard
-CD_FRAME_SIZE = 2352            # Raw audio sector size (bytes)
-
-# Safety margin for the last track. Subtracted from the track duration
-# so ffmpeg does not try to read past the end of the disc, which can
-# trigger a busy-loop in libcdparanoia (via libcdio).
-LAST_TRACK_SAFETY_MARGIN = 0.5  # seconds
-
-
-# ------------------------------------------------------------------------
-# Palette + helpers (mirrors XZN's look)
-# ------------------------------------------------------------------------
+# ========================================================================
+# Palette + helpers
+# ========================================================================
 DEFAULT_PALETTE = {
     "BG":        "#14121f",
     "PANEL":     "#1e1a30",
@@ -174,16 +154,7 @@ FONT_BTN  = ("Courier New", 10, "bold")
 FONT_TAG  = ("Helvetica", 11, "italic")
 
 
-# ------------------------------------------------------------------------
-# Resource path — works both when running from source and when frozen
-# by PyInstaller (--onefile extracts everything to sys._MEIPASS).
-# ------------------------------------------------------------------------
 def resource_path(relative_path):
-    """
-    Get absolute path to a resource, works for dev and for PyInstaller.
-    When frozen, PyInstaller unpacks bundled data to sys._MEIPASS and we
-    resolve relative names against that folder.
-    """
     if hasattr(sys, "_MEIPASS"):
         base_path = sys._MEIPASS  # type: ignore[attr-defined]
     else:
@@ -197,13 +168,7 @@ def get_icon_path():
 
 
 def find_ffmpeg() -> Optional[str]:
-    """
-    Locate ffmpeg, preferring the bundled version if it exists.
-    Bundled layout expected: <base>/ffmpeg/ffmpeg.exe (Windows) or
-    <base>/ffmpeg/ffmpeg (Linux/macOS) when frozen.
-    Falls back to whatever is on PATH (for running from source).
-    """
-    exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    exe_name = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
     bundled = resource_path(os.path.join("ffmpeg", exe_name))
     if os.path.isfile(bundled):
         return bundled
@@ -211,19 +176,23 @@ def find_ffmpeg() -> Optional[str]:
 
 
 def find_ffprobe() -> Optional[str]:
-    """
-    Locate ffprobe, preferring the bundled version if it exists.
-    Same logic as find_ffmpeg().
-    """
-    exe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    exe_name = "ffprobe.exe" if IS_WINDOWS else "ffprobe"
     bundled = resource_path(os.path.join("ffmpeg", exe_name))
     if os.path.isfile(bundled):
         return bundled
     return shutil.which("ffprobe")
 
 
+def find_cdparanoia() -> Optional[str]:
+    return shutil.which(CDPARANOIA_BIN)
+
+
+def find_drutil() -> Optional[str]:
+    return shutil.which("drutil") or "/usr/bin/drutil"
+
+
 def set_taskbar_app_id():
-    if sys.platform != "win32" or ctypes is None:
+    if not IS_WINDOWS or ctypes is None:
         return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(TASKBAR_APP_ID)
@@ -235,15 +204,18 @@ def apply_window_icon(window):
     icon_path = get_icon_path()
     if not icon_path:
         return
-    try:
-        window.iconbitmap(icon_path)
-    except Exception:
+    if IS_WINDOWS:
         try:
-            img = tk.PhotoImage(file=icon_path)
-            window.tk.call("wm", "iconphoto", window._w, img)
-            window._icon_photo_ref = img
+            window.iconbitmap(icon_path)
+            return
         except Exception:
             pass
+    try:
+        img = tk.PhotoImage(file=icon_path)
+        window.tk.call("wm", "iconphoto", window._w, img)
+        window._icon_photo_ref = img
+    except Exception as e:
+        print(f"[XZN-CDR] iconphoto failed: {e}")
 
 
 def hex_to_rgb(h):
@@ -332,16 +304,11 @@ def build_palette(accent_hex):
 
 def make_flat_button(parent, text, cmd, palette, width=None,
                      bg=None, fg=None, font=None, padx=14, pady=4):
-    """
-    Cross-platform button that respects bg/fg on macOS too.
-    Uses the smaller dialog font (FONT_UI_B) by default — this is the
-    same button style XZN uses in its Info / Theme / License windows.
-    """
     bg_color = bg if bg is not None else palette["RAISED"]
     fg_color = fg if fg is not None else palette["WHITE"]
     font_use = font if font is not None else FONT_UI_B
 
-    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    if IS_MAC or IS_LINUX:
         lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
                        font=font_use, padx=padx, pady=pady,
                        relief="raised", bd=1, cursor="hand2")
@@ -362,7 +329,7 @@ def make_flat_button(parent, text, cmd, palette, width=None,
 
 def _detect_windows_cd_drives() -> List[str]:
     result = []
-    if sys.platform != "win32" or ctypes is None:
+    if not IS_WINDOWS or ctypes is None:
         return result
     try:
         kernel32 = ctypes.windll.kernel32
@@ -381,15 +348,15 @@ def _detect_windows_cd_drives() -> List[str]:
 
 
 def _suggest_default_drive() -> Optional[str]:
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         drives = _detect_windows_cd_drives()
         return drives[0] if drives else None
 
-    if sys.platform == "darwin":
-        for dev in ("/dev/disk2", "/dev/disk1", "/dev/disk3"):
+    if IS_MAC:
+        for dev in ("/dev/disk2", "/dev/disk4", "/dev/disk1", "/dev/disk3"):
             if os.path.exists(dev):
                 return dev
-        return None
+        return "/dev/disk2"
 
     for dev in ("/dev/cdrom", "/dev/sr0", "/dev/cdrom0", "/dev/dvd"):
         if os.path.exists(dev):
@@ -419,9 +386,9 @@ def load_settings():
         print(f"[XZN-CDR] Failed to load settings: {e}")
 
     drv = defaults.get("drive") or ""
-    if sys.platform == "win32" and drv.startswith("/"):
+    if IS_WINDOWS and drv.startswith("/"):
         defaults["drive"] = _suggest_default_drive() or ""
-    elif sys.platform != "win32" and len(drv) == 2 and drv.endswith(":"):
+    elif not IS_WINDOWS and len(drv) == 2 and drv.endswith(":"):
         defaults["drive"] = _suggest_default_drive() or ""
 
     return defaults
@@ -443,9 +410,9 @@ def fmt_time(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-# ------------------------------------------------------------------------
+# ========================================================================
 # Cancellation helpers
-# ------------------------------------------------------------------------
+# ========================================================================
 class CancelledError(Exception):
     pass
 
@@ -472,275 +439,9 @@ def _safe_unlink(path):
         pass
 
 
-# ------------------------------------------------------------------------
-# ffmpeg libcdio helpers (used on Windows)
-# ------------------------------------------------------------------------
-def ffmpeg_list_tracks_windows(ffmpeg_path: str, drive: str) -> List[Tuple[int, float]]:
-    ffprobe = find_ffprobe()
-    if not ffprobe:
-        raise RuntimeError(
-            "ffprobe not found. It ships with ffmpeg — make sure both "
-            "ffmpeg and ffprobe are available (either bundled or on PATH)."
-        )
-
-    cmd = [
-        ffprobe,
-        "-f", "libcdio",
-        "-i", drive,
-        "-print_format", "json",
-        "-show_chapters",
-        "-loglevel", "error",
-    ]
-    try:
-        probe = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("ffprobe timed out while reading the CD TOC.")
-
-    if probe.returncode != 0:
-        err = (probe.stderr or "").strip()
-        raise RuntimeError(f"ffprobe failed: {err}")
-
-    try:
-        data = json.loads(probe.stdout or "{}")
-    except Exception as e:
-        raise RuntimeError(f"Could not parse ffprobe output as JSON: {e}")
-
-    chapters = data.get("chapters", [])
-    if not chapters:
-        raise RuntimeError(
-            "No chapters found on disc. Make sure an audio CD is inserted "
-            "and the drive letter is correct."
-        )
-
-    tracks: List[Tuple[int, float]] = []
-    for idx, ch in enumerate(chapters):
-        track_no = idx + 1
-        try:
-            title = (ch.get("tags", {}) or {}).get("title", "")
-            m = re.search(r"(\d+)", str(title))
-            if m:
-                track_no = int(m.group(1))
-        except Exception:
-            pass
-
-        try:
-            start = float(ch.get("start_time", 0.0))
-            end = float(ch.get("end_time", 0.0))
-        except Exception:
-            continue
-
-        dur = max(0.0, end - start)
-        tracks.append((track_no, dur))
-
-    return tracks
-
-
-def ffmpeg_read_track_windows(ffmpeg_path: str, drive: str,
-                              track_number: int,
-                              start_sec: float, duration_sec: float,
-                              out_path: str,
-                              progress_callback=None,
-                              cancel_event=None,
-                              is_last_track: bool = False) -> None:
-    effective_duration = duration_sec
-    if is_last_track:
-        effective_duration = max(0.5, duration_sec - LAST_TRACK_SAFETY_MARGIN)
-        if duration_sec > LAST_TRACK_SAFETY_MARGIN:
-            print(f"[XZN-CDR] Last track: shortening by "
-                  f"{LAST_TRACK_SAFETY_MARGIN:.2f}s to avoid end-of-disc hang")
-
-    ext = os.path.splitext(out_path)[1].lower()
-    if ext == ".mp3":
-        codec_args = ["-c:a", "libmp3lame"]
-    elif ext == ".ogg":
-        codec_args = ["-c:a", "libvorbis"]
-    elif ext == ".flac":
-        codec_args = ["-c:a", "flac"]
-    elif ext == ".wav":
-        codec_args = ["-c:a", "pcm_s16le"]
-    else:
-        codec_args = ["-c:a", "copy"]
-
-    cmd = [
-        ffmpeg_path,
-        "-y",
-        "-f", "libcdio",
-        "-paranoia_mode", "full",
-        "-i", drive,
-        "-ss", str(start_sec),
-        "-t", str(effective_duration),
-        *codec_args,
-        out_path,
-    ]
-
-    creationflags = 0
-    if sys.platform == "win32":
-        creationflags = 0x08000000  # CREATE_NO_WINDOW
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        bufsize=1,
-        creationflags=creationflags,
-    )
-
-    if proc.stderr is not None:
-        for line in proc.stderr:
-            if cancel_event is not None and cancel_event.is_set():
-                _kill_process(proc)
-                _safe_unlink(out_path)
-                raise CancelledError()
-
-            line = line.strip()
-            if not line:
-                continue
-            m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-            if m and progress_callback and effective_duration > 0:
-                hh, mm, ss = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                elapsed = hh * 3600 + mm * 60 + ss
-                pct = min(100, int((elapsed / effective_duration) * 100))
-                progress_callback(pct)
-
-    proc.wait()
-
-    if cancel_event is not None and cancel_event.is_set():
-        _safe_unlink(out_path)
-        raise CancelledError()
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg failed to rip track {track_number} "
-            f"(exit code {proc.returncode})"
-        )
-
-
-# ------------------------------------------------------------------------
-# pycdio helpers (used on Linux/macOS)
-# ------------------------------------------------------------------------
-def pycdio_list_tracks(device: str) -> List[Tuple[int, float]]:
-    if not _PYCDIO_AVAILABLE:
-        raise RuntimeError("pycdio is not available.")
-
-    tracks: List[Tuple[int, float]] = []
-    cd = None
-    try:
-        cd = cdio.Device(source=device)
-        toc = cd.get_toc()
-
-        if not toc:
-            raise RuntimeError("No TOC available — disc may not be an audio CD.")
-
-        first_track = toc.get_first_track()
-        last_track = toc.get_last_track()
-
-        for track_num in range(first_track, last_track + 1):
-            track = toc.get_track(track_num)
-
-            fmt = None
-            try:
-                fmt = track.get_format()
-            except Exception:
-                fmt = None
-            if fmt is not None and str(fmt).lower() != "audio":
-                continue
-
-            lsn_start = track.get_lsn()
-            lsn_end = track.get_last_lsn()
-            num_sectors = lsn_end - lsn_start + 1
-            duration_sec = num_sectors / float(CD_SECTORS_PER_SECOND)
-            tracks.append((track_num, duration_sec))
-
-        return tracks
-    except Exception as e:
-        raise RuntimeError(f"Failed to read CD TOC: {e}")
-    finally:
-        if cd is not None:
-            try:
-                cd.close()
-            except Exception:
-                pass
-
-
-def pycdio_read_track(device: str, track_num: int,
-                      progress_callback=None,
-                      cancel_event=None) -> bytes:
-    if not _PYCDIO_AVAILABLE:
-        raise RuntimeError("pycdio is not available.")
-
-    cd = None
-    try:
-        cd = cdio.Device(source=device)
-        toc = cd.get_toc()
-        track = toc.get_track(track_num)
-
-        lsn_start = track.get_lsn()
-        lsn_end = track.get_last_lsn()
-        total_sectors = lsn_end - lsn_start + 1
-
-        chunk_size = CD_SECTORS_PER_SECOND
-        chunks: List[bytes] = []
-        current_lsn = lsn_start
-
-        while current_lsn <= lsn_end:
-            if cancel_event is not None and cancel_event.is_set():
-                raise CancelledError()
-
-            sectors_to_read = min(chunk_size, lsn_end - current_lsn + 1)
-            try:
-                blocks, data = cd.read_sectors(
-                    current_lsn,
-                    pycdio.READ_MODE_AUDIO,
-                    sectors_to_read,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to read sectors at LSN {current_lsn}: {e}"
-                )
-
-            if blocks <= 0:
-                raise RuntimeError(
-                    f"Read returned 0 blocks at LSN {current_lsn}."
-                )
-
-            if isinstance(data, str):
-                raw_bytes = data.encode("utf-8", errors="surrogateescape")
-            else:
-                raw_bytes = bytes(data)
-
-            chunks.append(raw_bytes)
-            current_lsn += blocks
-
-            if progress_callback:
-                progress_callback(current_lsn - lsn_start, total_sectors)
-
-        return b"".join(chunks)
-    finally:
-        if cd is not None:
-            try:
-                cd.close()
-            except Exception:
-                pass
-
-
-def pycdio_write_wav(path: str, pcm_data: bytes) -> None:
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(AUDIO_CHANNELS)
-        wf.setsampwidth(AUDIO_BYTES_PER_SAMPLE)
-        wf.setframerate(AUDIO_SAMPLE_RATE)
-        wf.writeframes(pcm_data)
-
-
-# ------------------------------------------------------------------------
-# Ripper worker
-# ------------------------------------------------------------------------
+# ========================================================================
+# CD backends
+# ========================================================================
 @dataclass
 class RipJob:
     tracks: List[int]
@@ -780,10 +481,207 @@ def build_ffmpeg_args(job: RipJob, wav_path: str, out_path: str) -> List[str]:
     return args
 
 
-def _eject_drive(device: str, ui_queue: "queue.Queue"):
-    try:
-        if sys.platform == "win32":
-            letter = device.rstrip(":\\/")
+class CDBackend:
+    """Abstract CD backend. Subclasses implement list_tracks + rip_track."""
+    name = "abstract"
+
+    def is_available(self) -> bool:
+        return False
+
+    def availability_hint(self) -> str:
+        return ""
+
+    def list_tracks(self, drive: str) -> List[Tuple[int, float]]:
+        raise NotImplementedError
+
+    def rip_track(self, drive: str, track_no: int, out_path: str,
+                  duration_sec: float,
+                  progress_callback=None,
+                  cancel_event=None,
+                  is_last_track: bool = False) -> None:
+        """
+        Rip a single track to out_path. Backend is responsible for:
+        - reading CD audio
+        - encoding to the target format (or writing WAV directly)
+        - honouring cancel_event (raise CancelledError)
+        - honouring is_last_track (avoid end-of-disc hang)
+        """
+        raise NotImplementedError
+
+    def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
+        """Optional: eject the disc. Default does nothing."""
+        pass
+
+
+# ------------------------------------------------------------------------
+# Windows backend: ffmpeg -f libcdio
+# ------------------------------------------------------------------------
+class FFmpegBackend(CDBackend):
+    name = "ffmpeg-libcdio"
+
+    def __init__(self, ffmpeg: Optional[str], ffprobe: Optional[str]):
+        self.ffmpeg = ffmpeg
+        self.ffprobe = ffprobe
+
+    def is_available(self) -> bool:
+        return bool(self.ffmpeg and self.ffprobe)
+
+    def availability_hint(self) -> str:
+        if not self.ffmpeg:
+            return "ffmpeg not found."
+        if not self.ffprobe:
+            return "ffprobe not found (ships with ffmpeg full builds)."
+        return ""
+
+    def list_tracks(self, drive: str) -> List[Tuple[int, float]]:
+        cmd = [
+            self.ffprobe,
+            "-f", "libcdio",
+            "-i", drive,
+            "-print_format", "json",
+            "-show_chapters",
+            "-loglevel", "error",
+        ]
+        try:
+            probe = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ffprobe timed out while reading the CD TOC.")
+
+        if probe.returncode != 0:
+            err = (probe.stderr or "").strip()
+            raise RuntimeError(f"ffprobe failed: {err}")
+
+        try:
+            data = json.loads(probe.stdout or "{}")
+        except Exception as e:
+            raise RuntimeError(f"Could not parse ffprobe output as JSON: {e}")
+
+        chapters = data.get("chapters", [])
+        if not chapters:
+            raise RuntimeError(
+                "No chapters found on disc. Make sure an audio CD is inserted "
+                "and the drive letter is correct."
+            )
+
+        tracks: List[Tuple[int, float]] = []
+        for idx, ch in enumerate(chapters):
+            track_no = idx + 1
+            try:
+                title = (ch.get("tags", {}) or {}).get("title", "")
+                m = re.search(r"(\d+)", str(title))
+                if m:
+                    track_no = int(m.group(1))
+            except Exception:
+                pass
+
+            try:
+                start = float(ch.get("start_time", 0.0))
+                end = float(ch.get("end_time", 0.0))
+            except Exception:
+                continue
+
+            dur = max(0.0, end - start)
+            tracks.append((track_no, dur))
+
+        return tracks
+
+    def rip_track(self, drive: str, track_no: int, out_path: str,
+                  duration_sec: float,
+                  progress_callback=None,
+                  cancel_event=None,
+                  is_last_track: bool = False) -> None:
+
+        # For the Windows ffmpeg backend we need the track's start time
+        # on the disc — the caller passes it as part of the duration list,
+        # but we reconstruct it here by querying the TOC once more.
+        all_tracks = self.list_tracks(drive)
+        starts = {}
+        acc = 0.0
+        for i, (tn, dur) in enumerate(all_tracks):
+            starts[tn] = acc
+            acc += dur
+        start_sec = starts.get(track_no, 0.0)
+
+        effective_duration = duration_sec
+        if is_last_track:
+            effective_duration = max(0.5, duration_sec - LAST_TRACK_SAFETY_MARGIN)
+            if duration_sec > LAST_TRACK_SAFETY_MARGIN:
+                print(f"[XZN-CDR] Last track: shortening by "
+                      f"{LAST_TRACK_SAFETY_MARGIN:.2f}s to avoid end-of-disc hang")
+
+        ext = os.path.splitext(out_path)[1].lower()
+        if ext == ".mp3":
+            codec_args = ["-c:a", "libmp3lame"]
+        elif ext == ".ogg":
+            codec_args = ["-c:a", "libvorbis"]
+        elif ext == ".flac":
+            codec_args = ["-c:a", "flac"]
+        elif ext == ".wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        else:
+            codec_args = ["-c:a", "copy"]
+
+        cmd = [
+            self.ffmpeg,
+            "-y",
+            "-f", "libcdio",
+            "-paranoia_mode", "full",
+            "-i", drive,
+            "-ss", str(start_sec),
+            "-t", str(effective_duration),
+            *codec_args,
+            out_path,
+        ]
+
+        creationflags = 0x08000000 if IS_WINDOWS else 0
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+            creationflags=creationflags,
+        )
+
+        if proc.stderr is not None:
+            for line in proc.stderr:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_process(proc)
+                    _safe_unlink(out_path)
+                    raise CancelledError()
+
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+                if m and progress_callback and effective_duration > 0:
+                    hh, mm, ss = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                    elapsed = hh * 3600 + mm * 60 + ss
+                    pct = min(100, int((elapsed / effective_duration) * 100))
+                    progress_callback(pct)
+
+        proc.wait()
+
+        if cancel_event is not None and cancel_event.is_set():
+            _safe_unlink(out_path)
+            raise CancelledError()
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed to rip track {track_no} "
+                f"(exit code {proc.returncode})"
+            )
+
+    def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
+        try:
+            letter = drive.rstrip(":\\/")
             ps = (
                 f"(New-Object -comObject Shell.Application)"
                 f".NameSpace(17).ParseName('{letter}:').InvokeVerb('Eject')"
@@ -795,18 +693,232 @@ def _eject_drive(device: str, ui_queue: "queue.Queue"):
                 timeout=10,
             )
             ui_queue.put(("log", "Disc ejected."))
-        else:
+        except Exception as e:
+            ui_queue.put(("log", f"Eject skipped: {e}"))
+
+
+# ------------------------------------------------------------------------
+# Linux backend: pycdio
+# ------------------------------------------------------------------------
+class PyCdioBackend(CDBackend):
+    name = "pycdio"
+
+    def is_available(self) -> bool:
+        return _PYCDIO_AVAILABLE
+
+    def availability_hint(self) -> str:
+        if not _PYCDIO_AVAILABLE:
+            return ("pycdio not installed — install libcdio + pycdio:\n"
+                    "  sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio")
+        return ""
+
+    def list_tracks(self, drive: str) -> List[Tuple[int, float]]:
+        if not _PYCDIO_AVAILABLE:
+            raise RuntimeError("pycdio is not available.")
+
+        tracks: List[Tuple[int, float]] = []
+        cd = None
+        try:
+            cd = cdio.Device(source=drive)
+            toc = cd.get_toc()
+            if not toc:
+                raise RuntimeError("No TOC available — disc may not be an audio CD.")
+
+            first_track = toc.get_first_track()
+            last_track = toc.get_last_track()
+
+            for track_num in range(first_track, last_track + 1):
+                track = toc.get_track(track_num)
+                fmt = None
+                try:
+                    fmt = track.get_format()
+                except Exception:
+                    fmt = None
+                if fmt is not None and str(fmt).lower() != "audio":
+                    continue
+
+                lsn_start = track.get_lsn()
+                lsn_end = track.get_last_lsn()
+                num_sectors = lsn_end - lsn_start + 1
+                duration_sec = num_sectors / float(CD_SECTORS_PER_SECOND)
+                tracks.append((track_num, duration_sec))
+
+            return tracks
+        except Exception as e:
+            raise RuntimeError(f"Failed to read CD TOC: {e}")
+        finally:
+            if cd is not None:
+                try:
+                    cd.close()
+                except Exception:
+                    pass
+
+    def _read_track_pcm(self, drive: str, track_num: int,
+                        progress_callback=None,
+                        cancel_event=None) -> bytes:
+        cd = None
+        try:
+            cd = cdio.Device(source=drive)
+            toc = cd.get_toc()
+            track = toc.get_track(track_num)
+
+            lsn_start = track.get_lsn()
+            lsn_end = track.get_last_lsn()
+            total_sectors = lsn_end - lsn_start + 1
+
+            chunk_size = CD_SECTORS_PER_SECOND
+            chunks: List[bytes] = []
+            current_lsn = lsn_start
+
+            while current_lsn <= lsn_end:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError()
+
+                sectors_to_read = min(chunk_size, lsn_end - current_lsn + 1)
+                try:
+                    blocks, data = cd.read_sectors(
+                        current_lsn,
+                        pycdio.READ_MODE_AUDIO,
+                        sectors_to_read,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to read sectors at LSN {current_lsn}: {e}"
+                    )
+
+                if blocks <= 0:
+                    raise RuntimeError(
+                        f"Read returned 0 blocks at LSN {current_lsn}."
+                    )
+
+                if isinstance(data, str):
+                    raw_bytes = data.encode("utf-8", errors="surrogateescape")
+                else:
+                    raw_bytes = bytes(data)
+
+                chunks.append(raw_bytes)
+                current_lsn += blocks
+
+                if progress_callback:
+                    progress_callback(current_lsn - lsn_start, total_sectors)
+
+            return b"".join(chunks)
+        finally:
+            if cd is not None:
+                try:
+                    cd.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _write_wav(path: str, pcm_data: bytes) -> None:
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(AUDIO_CHANNELS)
+            wf.setsampwidth(AUDIO_BYTES_PER_SAMPLE)
+            wf.setframerate(AUDIO_SAMPLE_RATE)
+            wf.writeframes(pcm_data)
+
+    def rip_track(self, drive: str, track_no: int, out_path: str,
+                  duration_sec: float,
+                  progress_callback=None,
+                  cancel_event=None,
+                  is_last_track: bool = False) -> None:
+        if not _PYCDIO_AVAILABLE:
+            raise RuntimeError("pycdio is not available.")
+
+        fmt = self._infer_format(out_path)
+        tmpdir = os.path.dirname(out_path) or "."
+        wav_path = os.path.join(tmpdir, f".xzn_tmp_{track_no:02d}.wav")
+
+        def pcm_progress(current, total):
+            if progress_callback:
+                pct = int((current / max(1, total)) * 50)
+                progress_callback(pct)
+
+        try:
+            pcm_data = self._read_track_pcm(
+                drive, track_no, pcm_progress, cancel_event
+            )
+        except CancelledError:
+            _safe_unlink(wav_path)
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Failed to read track {track_no}: {e}")
+
+        if cancel_event is not None and cancel_event.is_set():
+            _safe_unlink(wav_path)
+            raise CancelledError()
+
+        if not pcm_data:
+            raise RuntimeError(f"Track {track_no} contained no audio data.")
+
+        self._write_wav(wav_path, pcm_data)
+        if progress_callback:
+            progress_callback(60)
+
+        if fmt == "WAV":
+            shutil.move(wav_path, out_path)
+            return
+
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            _safe_unlink(wav_path)
+            raise RuntimeError("ffmpeg not found — required for MP3/OGG/FLAC.")
+
+        args = self._build_encode_args(ffmpeg, fmt, wav_path, out_path)
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=0x08000000 if IS_WINDOWS else 0,
+        )
+        proc.wait()
+
+        if cancel_event is not None and cancel_event.is_set():
+            _kill_process(proc)
+            _safe_unlink(out_path)
+            _safe_unlink(wav_path)
+            raise CancelledError()
+
+        if proc.returncode != 0:
+            err = ""
+            try:
+                if proc.stderr is not None:
+                    err = "".join(proc.stderr.readlines())[-300:]
+            except Exception:
+                pass
+            _safe_unlink(wav_path)
+            raise RuntimeError(
+                f"ffmpeg failed for track {track_no}: {err.strip()}"
+            )
+
+        _safe_unlink(wav_path)
+
+    @staticmethod
+    def _infer_format(out_path: str) -> str:
+        ext = os.path.splitext(out_path)[1].lower()
+        return {".mp3": "MP3", ".ogg": "OGG", ".flac": "FLAC", ".wav": "WAV"}.get(
+            ext, "MP3"
+        )
+
+    @staticmethod
+    def _build_encode_args(ffmpeg: str, fmt: str, wav_in: str, out: str) -> List[str]:
+        args = [ffmpeg, "-y", "-i", wav_in]
+        if fmt == "MP3":
+            args += ["-codec:a", "libmp3lame", "-b:a", "320k"]
+        elif fmt == "OGG":
+            args += ["-codec:a", "libvorbis", "-qscale:a", "6"]
+        elif fmt == "FLAC":
+            args += ["-codec:a", "flac", "-compression_level", "5"]
+        args += [out]
+        return args
+
+    def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
+        try:
             if shutil.which("eject"):
                 subprocess.run(
-                    ["eject", device],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10,
-                )
-                ui_queue.put(("log", "Disc ejected."))
-            elif sys.platform == "darwin" and shutil.which("drutil"):
-                subprocess.run(
-                    ["drutil", "tray", "eject"],
+                    ["eject", drive],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=10,
@@ -814,16 +926,214 @@ def _eject_drive(device: str, ui_queue: "queue.Queue"):
                 ui_queue.put(("log", "Disc ejected."))
             else:
                 ui_queue.put(("log", "Eject skipped (no eject tool available)."))
-    except Exception as e:
-        ui_queue.put(("log", f"Eject skipped: {e}"))
+        except Exception as e:
+            ui_queue.put(("log", f"Eject skipped: {e}"))
 
 
-def rip_worker_ffmpeg_windows(job: RipJob, ui_queue: "queue.Queue"):
-    if not job.ffmpeg:
-        ui_queue.put(("error", "ffmpeg not found."))
-        return
+# ------------------------------------------------------------------------
+# macOS backend: cd-paranoia
+# ------------------------------------------------------------------------
+class CdParanoiaBackend(CDBackend):
+    name = "cd-paranoia"
 
+    def __init__(self, ffmpeg: Optional[str]):
+        self.ffmpeg = ffmpeg
+
+    def is_available(self) -> bool:
+        return bool(find_cdparanoia())
+
+    def availability_hint(self) -> str:
+        if not find_cdparanoia():
+            return (f"{CDPARANOIA_BIN} not found — install with: "
+                    f"brew install {CDPARANOIA_PKG}")
+        return ""
+
+    def list_tracks(self, drive: str) -> List[Tuple[int, float]]:
+        cdparanoia = find_cdparanoia()
+        if not cdparanoia:
+            raise RuntimeError(
+                f"{CDPARANOIA_BIN} not found. "
+                f"Install it with: brew install {CDPARANOIA_PKG}"
+            )
+
+        cmd = [cdparanoia, "-Q", "-d", drive]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"{CDPARANOIA_BIN} -Q timed out.")
+
+        out = result.stdout or ""
+        tracks: List[Tuple[int, float]] = []
+        pattern = re.compile(r"^\s*(\d+)\.\s+(\d+):(\d+):(\d+)")
+        for line in out.splitlines():
+            m = pattern.match(line)
+            if not m:
+                continue
+            try:
+                track_no = int(m.group(1))
+                mm = int(m.group(2))
+                ss = int(m.group(3))
+                ff = int(m.group(4))
+            except Exception:
+                continue
+            dur = mm * 60 + ss + ff / 75.0
+            if dur > 0:
+                tracks.append((track_no, dur))
+
+        if not tracks:
+            if ("No CD" in out or "Unable to open" in out
+                    or "not ready" in out or "No medium" in out):
+                raise RuntimeError(
+                    f"CD drive '{drive}' not ready or no audio CD detected."
+                )
+            raise RuntimeError(
+                "Could not parse cd-paranoia output. Make sure an audio CD is "
+                "inserted and the device path is correct.\n\n"
+                f"cd-paranoia said:\n{out[-500:]}"
+            )
+
+        return tracks
+
+    def rip_track(self, drive: str, track_no: int, out_path: str,
+                  duration_sec: float,
+                  progress_callback=None,
+                  cancel_event=None,
+                  is_last_track: bool = False) -> None:
+        cdparanoia = find_cdparanoia()
+        if not cdparanoia:
+            raise RuntimeError(
+                f"{CDPARANOIA_BIN} not found. "
+                f"Install it with: brew install {CDPARANOIA_PKG}"
+            )
+
+        fmt = PyCdioBackend._infer_format(out_path)
+        tmpdir = os.path.dirname(out_path) or "."
+        wav_path = os.path.join(tmpdir, f".xzn_tmp_{track_no:02d}.wav")
+
+        cmd = [cdparanoia, "-d", drive, "-w", wav_path, str(track_no)]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+        )
+
+        if proc.stderr is not None:
+            for line in proc.stderr:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_process(proc)
+                    _safe_unlink(wav_path)
+                    raise CancelledError()
+
+                line = line.rstrip()
+                if not line:
+                    continue
+                m = re.search(r"\[(\d+):(\d+)\]", line)
+                if m and progress_callback and duration_sec > 0:
+                    mm = int(m.group(1))
+                    ss = int(m.group(2))
+                    elapsed = mm * 60 + ss
+                    pct = min(50, int((elapsed / duration_sec) * 50))
+                    progress_callback(pct)
+
+        proc.wait()
+
+        if cancel_event is not None and cancel_event.is_set():
+            _safe_unlink(wav_path)
+            raise CancelledError()
+
+        if proc.returncode != 0:
+            _safe_unlink(wav_path)
+            raise RuntimeError(
+                f"cd-paranoia failed for track {track_no} "
+                f"(exit code {proc.returncode})."
+            )
+
+        if not os.path.isfile(wav_path):
+            raise RuntimeError(
+                f"cd-paranoia did not create '{wav_path}'. "
+                "The CD may be copy-protected or unreadable."
+            )
+
+        if progress_callback:
+            progress_callback(50)
+
+        if fmt == "WAV":
+            shutil.move(wav_path, out_path)
+            return
+
+        if not self.ffmpeg:
+            _safe_unlink(wav_path)
+            raise RuntimeError("ffmpeg not found — required for MP3/OGG/FLAC.")
+
+        args = PyCdioBackend._build_encode_args(
+            self.ffmpeg, fmt, wav_path, out_path
+        )
+        enc = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        enc.wait()
+
+        if cancel_event is not None and cancel_event.is_set():
+            _kill_process(enc)
+            _safe_unlink(out_path)
+            _safe_unlink(wav_path)
+            raise CancelledError()
+
+        if enc.returncode != 0:
+            err = ""
+            try:
+                if enc.stderr is not None:
+                    err = "".join(enc.stderr.readlines())[-300:]
+            except Exception:
+                pass
+            _safe_unlink(wav_path)
+            raise RuntimeError(
+                f"ffmpeg failed for track {track_no}: {err.strip()}"
+            )
+
+        _safe_unlink(wav_path)
+
+    def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
+        try:
+            drutil = find_drutil()
+            subprocess.run(
+                [drutil, "tray", "eject"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            ui_queue.put(("log", "Disc ejected."))
+        except Exception as e:
+            ui_queue.put(("log", f"Eject skipped: {e}"))
+
+
+def make_backend(ffmpeg: Optional[str], ffprobe: Optional[str]) -> CDBackend:
+    """Pick the right CD backend for the current platform."""
+    if IS_WINDOWS:
+        return FFmpegBackend(ffmpeg, ffprobe)
+    if IS_MAC:
+        return CdParanoiaBackend(ffmpeg)
+    return PyCdioBackend()
+
+
+# ========================================================================
+# Ripper worker (platform-agnostic)
+# ========================================================================
+def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
+    tmpdir = os.path.join(job.outdir, ".xzn_tmp")
     os.makedirs(job.outdir, exist_ok=True)
+    os.makedirs(tmpdir, exist_ok=True)
 
     total = len(job.tracks)
     if total == 0:
@@ -846,20 +1156,17 @@ def rip_worker_ffmpeg_windows(job: RipJob, ui_queue: "queue.Queue"):
             ui_queue.put(("log", f"Ripping {label} …"))
             ui_queue.put(("progress", 0, label))
 
-            start_sec = sum(job.track_durations[:idx - 1])
-            is_last = (idx == total)
-
             def progress_cb(pct):
                 ui_queue.put(("progress", pct, label))
 
+            is_last = (idx == total)
+
             try:
-                ffmpeg_read_track_windows(
-                    job.ffmpeg,
+                backend.rip_track(
                     job.drive,
                     track_no,
-                    start_sec,
-                    duration_sec,
                     out_path,
+                    duration_sec,
                     progress_callback=progress_cb,
                     cancel_event=job.cancel_event,
                     is_last_track=is_last,
@@ -879,155 +1186,159 @@ def rip_worker_ffmpeg_windows(job: RipJob, ui_queue: "queue.Queue"):
             return
 
         if job.eject:
-            _eject_drive(job.drive, ui_queue)
+            backend.eject(job.drive, ui_queue)
+
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
         ui_queue.put(("done", f"Finished ripping {total} track(s)."))
 
     except Exception as e:
         traceback.print_exc()
         ui_queue.put(("error", str(e)))
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 
-def rip_worker_pycdio(job: RipJob, ui_queue: "queue.Queue"):
-    if not _PYCDIO_AVAILABLE:
-        ui_queue.put(("error", "pycdio is not available."))
-        return
+# ========================================================================
+# macOS flat dropdown (only used on macOS, harmless elsewhere)
+# ========================================================================
+class FlatOptionMenu:
+    def __init__(self, parent, var, options, palette, width=8, on_change=None):
+        self.palette = palette
+        self.var = var
+        self.options = list(options)
+        self.on_change = on_change
+        self._popup = None
 
-    tmpdir = os.path.join(job.outdir, ".xzn_tmp")
-    os.makedirs(job.outdir, exist_ok=True)
-    os.makedirs(tmpdir, exist_ok=True)
+        bg_color = palette["RAISED"]
+        fg_color = palette["WHITE"]
 
-    total = len(job.tracks)
-    if total == 0:
-        ui_queue.put(("error", "No tracks selected."))
-        return
+        self.btn = tk.Label(
+            parent,
+            text=var.get(),
+            bg=bg_color, fg=fg_color,
+            font=FONT_UI_B, padx=8, pady=3,
+            relief="raised", bd=1, cursor="hand2",
+            width=width, anchor="w",
+        )
+        self.btn.bind("<Button-1>", self._open)
+        self.btn.bind("<Enter>", lambda e: self.btn.config(bg=lighten(bg_color, 0.15)))
+        self.btn.bind("<Leave>", lambda e: self.btn.config(bg=bg_color))
 
-    ripped = 0
-    try:
-        for idx, track_no in enumerate(job.tracks, start=1):
-            if job.is_cancelled():
-                ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
-                return
-
-            wav_path = os.path.join(tmpdir, f"track_{track_no:02d}.wav")
-            out_name = f"track_{track_no:02d}{job.extension()}"
-            out_path = os.path.join(job.outdir, out_name)
-
-            label = f"Track {track_no:02d} ({idx}/{total})"
-            ui_queue.put(("log", f"Reading {label} …"))
-            ui_queue.put(("progress", 0, label))
-
-            def progress_cb(current, total_sectors):
-                pct = int((current / max(1, total_sectors)) * 50)
-                ui_queue.put(("progress", pct, label))
-
+        try:
+            self.var.trace_add("write", lambda *a: self._update_text())
+        except Exception:
             try:
-                pcm_data = pycdio_read_track(
-                    job.drive, track_no, progress_cb,
-                    cancel_event=job.cancel_event,
-                )
-            except CancelledError:
-                _safe_unlink(wav_path)
-                ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
-                return
-            except Exception as e:
-                raise RuntimeError(f"Failed to read track {track_no}: {e}")
+                self.var.trace("w", lambda *a: self._update_text())
+            except Exception:
+                pass
 
-            if job.is_cancelled():
-                _safe_unlink(wav_path)
-                ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
-                return
+    def _update_text(self):
+        try:
+            self.btn.config(text=self.var.get())
+        except Exception:
+            pass
 
-            if not pcm_data:
-                raise RuntimeError(f"Track {track_no} contained no audio data.")
+    def grid(self, **kwargs):
+        self.btn.grid(**kwargs)
+        return self
 
-            ui_queue.put(("log", f"  Writing {os.path.basename(wav_path)} …"))
-            pycdio_write_wav(wav_path, pcm_data)
-            ui_queue.put(("progress", 60, label))
+    def pack(self, **kwargs):
+        self.btn.pack(**kwargs)
+        return self
 
-            if job.fmt != "WAV":
-                if not job.ffmpeg:
-                    raise RuntimeError(
-                        "ffmpeg not found — required for MP3/OGG/FLAC."
-                    )
-
-                ff_args = build_ffmpeg_args(job, wav_path, out_path)
-                ui_queue.put(("log", f"  Encoding -> {out_name}"))
-
-                creationflags = 0
-                if sys.platform == "win32":
-                    creationflags = 0x08000000
-
-                proc = subprocess.Popen(
-                    ff_args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    creationflags=creationflags,
-                )
-                proc.wait()
-
-                if job.is_cancelled():
-                    _kill_process(proc)
-                    _safe_unlink(out_path)
-                    _safe_unlink(wav_path)
-                    ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
-                    return
-
-                if proc.returncode != 0:
-                    err = ""
-                    try:
-                        if proc.stderr is not None:
-                            err = "".join(proc.stderr.readlines())[-300:]
-                    except Exception:
-                        pass
-                    raise RuntimeError(
-                        f"ffmpeg failed for track {track_no}: {err.strip()}"
-                    )
-
-                try:
-                    os.remove(wav_path)
-                except Exception:
-                    pass
-            else:
-                shutil.move(wav_path, out_path)
-
-            ripped += 1
-            ui_queue.put(("progress", 100, label))
-            ui_queue.put(("log", f"  -> {out_name}"))
-
-        if job.is_cancelled():
-            ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
+    def _open(self, event=None):
+        if self._popup is not None:
             return
+        p = self.palette
 
-        if job.eject:
-            _eject_drive(job.drive, ui_queue)
-
+        self._popup = tk.Toplevel(self.btn)
+        self._popup.overrideredirect(True)
+        self._popup.configure(bg=p["ACCENT_LO"])
         try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            self._popup.attributes("-topmost", True)
         except Exception:
             pass
 
-        ui_queue.put(("done", f"Finished ripping {total} track(s)."))
+        inner = tk.Frame(self._popup, bg=p["RAISED"], bd=0, highlightthickness=0)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
 
-    except Exception as e:
-        traceback.print_exc()
-        ui_queue.put(("error", str(e)))
+        for opt in self.options:
+            item = tk.Label(
+                inner, text=opt, font=FONT_UI,
+                bg=p["RAISED"], fg=p["WHITE"],
+                anchor="w", padx=14, pady=4, cursor="hand2",
+            )
+            item.pack(fill="x")
+            item.bind("<Enter>", lambda e, w=item: w.config(bg=p["ACCENT"], fg=p["WHITE"]))
+            item.bind("<Leave>", lambda e, w=item: w.config(bg=p["RAISED"], fg=p["WHITE"]))
+            item.bind("<Button-1>", lambda e, o=opt: self._select(o))
+
+        x = self.btn.winfo_rootx()
+        y = self.btn.winfo_rooty() + self.btn.winfo_height()
+        self._popup.geometry(f"+{x}+{y}")
+
         try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            self._popup.focus_set()
         except Exception:
             pass
 
+        self._popup.bind("<FocusOut>", lambda e: self._close())
+        self._popup.bind("<Escape>", lambda e: self._close())
+        self.btn.bind_all("<Button-1>", self._on_global_click, add="+")
 
-# ------------------------------------------------------------------------
-# License window (full MIT text) — same look & alpha behavior as XZN
-# ------------------------------------------------------------------------
+    def _on_global_click(self, event):
+        if self._popup is None:
+            return
+        try:
+            w = self.btn.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        p = w
+        while p is not None:
+            if p is self._popup:
+                return
+            try:
+                p = p.master
+            except Exception:
+                p = None
+        self._close()
+
+    def _select(self, value):
+        try:
+            self.var.set(value)
+        except Exception:
+            pass
+        if self.on_change is not None:
+            try:
+                self.on_change(value)
+            except Exception:
+                pass
+        self._close()
+
+    def _close(self):
+        if self._popup is None:
+            return
+        try:
+            self.btn.unbind_all("<Button-1>")
+        except Exception:
+            pass
+        try:
+            self._popup.destroy()
+        except Exception:
+            pass
+        self._popup = None
+
+
+# ========================================================================
+# License / Info / Theme windows
+# ========================================================================
 def show_license_window(parent, palette, app=None):
-    """
-    Open a small window showing the full MIT license text.
-    Read-only, scrollable, matching the app's look.
-    Registers itself with the app so the alpha slider affects it too.
-    """
     p = palette
     win = tk.Toplevel(parent)
     win.title("License – XZN-CDR")
@@ -1037,7 +1348,12 @@ def show_license_window(parent, palette, app=None):
     win.transient(parent)
     apply_window_icon(win)
 
-    # --- Close handler that also unregisters the window -----------------
+    if app is not None:
+        try:
+            app._attach_macos_menu(win)
+        except Exception:
+            pass
+
     def _close():
         if app is not None:
             try:
@@ -1052,17 +1368,13 @@ def show_license_window(parent, palette, app=None):
 
     win.protocol("WM_DELETE_WINDOW", _close)
 
-    # Footer FIRST, packed at the bottom, so it is always visible
     footer = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
     footer.pack(side="bottom", fill="x")
-
     make_flat_button(footer, "Close", _close, palette=p,
                      padx=14, pady=4).pack(side="right")
 
-    # Header (top)
     header = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
     header.pack(side="top", fill="x")
-
     tk.Label(header, text="MIT LICENSE",
              font=("Helvetica", 12, "bold"),
              bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
@@ -1071,7 +1383,6 @@ def show_license_window(parent, palette, app=None):
         side="top", fill="x", padx=20
     )
 
-    # Body (fills the rest)
     body = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
     body.pack(side="top", fill="both", expand=True)
 
@@ -1104,7 +1415,6 @@ def show_license_window(parent, palette, app=None):
 
     win.bind("<Escape>", lambda e: _close())
 
-    # Center on parent
     try:
         win.update_idletasks()
         mx = parent.winfo_rootx() + parent.winfo_width() // 2
@@ -1115,8 +1425,6 @@ def show_license_window(parent, palette, app=None):
     except Exception:
         pass
 
-    # Register with the app so it participates in the alpha system,
-    # then apply the current alpha immediately.
     if app is not None:
         try:
             app._extra_alpha_windows.append(win)
@@ -1133,9 +1441,6 @@ def show_license_window(parent, palette, app=None):
         pass
 
 
-# ------------------------------------------------------------------------
-# Theme + Info windows
-# ------------------------------------------------------------------------
 class ThemeWindow:
     def __init__(self, master, app):
         self.app = app
@@ -1146,6 +1451,11 @@ class ThemeWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
 
         p = app.palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=18, pady=16)
@@ -1190,7 +1500,6 @@ class ThemeWindow:
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
         self.win.bind("<Escape>", lambda e: self._close())
 
-        # Register with the app for alpha participation
         try:
             app._extra_alpha_windows.append(self.win)
         except Exception:
@@ -1226,11 +1535,15 @@ class InfoWindow:
         self.win.transient(master)
         apply_window_icon(self.win)
 
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
+
         p = palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
         frame.pack(fill="both", expand=True)
 
-        # --- Logo + Title row ---
         title_row = tk.Frame(frame, bg=p["PANEL"])
         title_row.pack(anchor="w", fill="x")
 
@@ -1243,7 +1556,7 @@ class InfoWindow:
                 logo_lbl = tk.Label(title_row, image=logo_photo,
                                     bg=p["PANEL"], bd=0,
                                     highlightthickness=0)
-                logo_lbl.image = logo_photo  # keep reference
+                logo_lbl.image = logo_photo
                 logo_lbl.pack(side="left", padx=(0, 14))
             except Exception as e:
                 print(f"[XZN-CDR] Info logo load failed: {e}")
@@ -1268,8 +1581,8 @@ class InfoWindow:
 
         tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(0, 14))
 
-        backend = "pycdio (native)" if sys.platform != "win32" else "ffmpeg -f libcdio"
-        tk.Label(frame, text=f"CD backend: {backend}",
+        backend_name = getattr(app.backend, "name", "unknown")
+        tk.Label(frame, text=f"CD backend: {backend_name}",
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["WHITE"]).pack(anchor="w")
         tk.Label(frame, text="Encodes with ffmpeg (MP3 / OGG / FLAC).",
@@ -1283,7 +1596,6 @@ class InfoWindow:
         tk.Label(frame, text="Released under the MIT License.",
                  font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
-        # --- Button row: License + Close ---
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(anchor="e", fill="x")
 
@@ -1308,7 +1620,6 @@ class InfoWindow:
         h = self.win.winfo_height()
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
 
-        # Register with the app for alpha participation
         try:
             app._extra_alpha_windows.append(self.win)
         except Exception:
@@ -1326,15 +1637,16 @@ class InfoWindow:
             pass
 
 
-# ------------------------------------------------------------------------
+# ========================================================================
 # Main application
-# ------------------------------------------------------------------------
+# ========================================================================
 class App:
     def __init__(self):
         set_taskbar_app_id()
 
         self.root = tk.Tk()
         apply_window_icon(self.root)
+        self._setup_macos_menu()
         self.root.title(APP_NAME)
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
         self.root.minsize(680, 640)
@@ -1345,12 +1657,10 @@ class App:
         self._initial_alpha = int(settings.get("alpha") or 100)
         self.palette = build_palette(self.accent)
 
-        # External tools
         self.ffmpeg = find_ffmpeg()
         self.ffprobe = find_ffprobe()
-        self.is_windows = (sys.platform == "win32")
+        self.backend: CDBackend = make_backend(self.ffmpeg, self.ffprobe)
 
-        # State
         self.cd_tracks: List[Tuple[int, float]] = []
         self.total_cd_time: float = 0.0
         self.ripping = False
@@ -1367,9 +1677,6 @@ class App:
         self._main_frame = None
         self._progress_value = 0.0
         self._progress_label = ""
-
-        # Registry for toplevels that follow the main window's alpha
-        # (used for Info, Theme and License windows)
         self._extra_alpha_windows: List[tk.Toplevel] = []
 
         self._build_ui()
@@ -1385,32 +1692,53 @@ class App:
         self.root.after(100, self._poll_ui_queue)
         self.root.after(200, self._startup_check)
 
-    # -- UI ---------------------------------------------------------------
+    # --- macOS menu ------------------------------------------------------
+    def _setup_macos_menu(self):
+        if not IS_MAC:
+            return
+        try:
+            self._mac_menubar = tk.Menu(self.root)
+            self.root.config(menu=self._mac_menubar)
+            self.root.createcommand(
+                "tk::mac::standardAboutPanel", self._show_mac_about
+            )
+        except Exception as e:
+            self._mac_menubar = None
+            print(f"[XZN-CDR] macOS menu setup failed: {e}")
+
+    def _attach_macos_menu(self, win):
+        if not IS_MAC:
+            return
+        mb = getattr(self, "_mac_menubar", None)
+        if mb is None:
+            return
+        try:
+            win.config(menu=mb)
+        except Exception as e:
+            print(f"[XZN-CDR] _attach_macos_menu failed: {e}")
+
+    def _show_mac_about(self):
+        try:
+            self.show_info()
+        except Exception as e:
+            print(f"[XZN-CDR] macOS About failed: {e}")
+
+    # --- UI helpers ------------------------------------------------------
     def _mkbtn(self, parent, text, cmd, w=4):
-        """Main-window button style (big Courier font)."""
         p = self.palette
         bg_color = p["RAISED"]
         fg_color = p["WHITE"]
         hover_bg = lighten(bg_color, 0.15)
 
-        if sys.platform == "darwin" or sys.platform.startswith("linux"):
-            lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
-                           font=FONT_BTN, padx=8, pady=3,
-                           relief="raised", bd=1, cursor="hand2")
-            lbl.bind("<Button-1>", lambda e: cmd())
-            lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_bg))
-            lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
-            return lbl
-        else:
-            return tk.Button(parent, text=text, width=w, command=cmd,
-                             bg=bg_color, fg=fg_color,
-                             activebackground=hover_bg,
-                             activeforeground=fg_color,
-                             relief="raised", bd=1, font=FONT_BTN, takefocus=0)
+        lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                       font=FONT_BTN, padx=8, pady=3,
+                       relief="raised", bd=1, cursor="hand2")
+        lbl.bind("<Button-1>", lambda e: cmd())
+        lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_bg))
+        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+        return lbl
 
     def _mk_pl_scale(self, parent):
-        """Create a vertical tk.Scale styled exactly like XZN's playlist
-        scrollbar (same width, same colors, same look)."""
         p = self.palette
         return tk.Scale(parent, from_=0, to=1, orient="vertical",
                         showvalue=False, resolution=0.001,
@@ -1436,6 +1764,7 @@ class App:
         except Exception:
             pass
 
+    # --- Build UI --------------------------------------------------------
     def _build_ui(self):
         p = self.palette
         self.root.configure(bg=p["BG"])
@@ -1449,7 +1778,7 @@ class App:
         self._main_frame.pack(fill="both", expand=True)
         parent = self._main_frame
 
-        # Header ---------------------------------------------------------
+        # Header
         hdr = tk.Frame(parent, bg=p["PANEL"], height=44)
         hdr.pack(fill="x", padx=8, pady=(8, 4))
         hdr.pack_propagate(False)
@@ -1469,7 +1798,7 @@ class App:
         self.alpha_scale.set(self._initial_alpha)
         self.alpha_scale.pack(side="left", padx=(4, 0))
 
-        # Hero -----------------------------------------------------------
+        # Hero
         hero = tk.Canvas(parent, height=70, bg=p["PANEL"], highlightthickness=0)
         hero.pack(fill="x", padx=8, pady=(0, 6))
         hero.update_idletasks()
@@ -1492,42 +1821,71 @@ class App:
                          text="Rip audio CDs to MP3 / OGG / FLAC / WAV.",
                          font=FONT_TAG, fill=p["WHITE"], anchor="nw")
 
-        # Options --------------------------------------------------------
+        # Options
         opt = tk.Frame(parent, bg=p["PANEL"])
         opt.pack(fill="x", padx=8, pady=(0, 4))
 
         tk.Label(opt, text="Drive", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=0, sticky="w", padx=(10, 4), pady=4)
-        self.drive_entry = tk.Entry(opt, width=18, bg=p["SUNKEN"], fg=p["WHITE"],
-                                    insertbackground=p["WHITE"], relief="flat", font=FONT_UI)
+
+        if IS_MAC:
+            entry_wrap = tk.Frame(opt, bg=p["SUNKEN"], bd=0, highlightthickness=0)
+            entry_wrap.grid(row=0, column=1, sticky="w", pady=4)
+            self.drive_entry = tk.Entry(
+                entry_wrap, width=16,
+                bg=p["SUNKEN"], fg=p["WHITE"],
+                insertbackground=p["WHITE"],
+                relief="flat", bd=0, highlightthickness=0,
+                font=FONT_UI,
+            )
+            self.drive_entry.pack(padx=6, pady=3)
+        else:
+            self.drive_entry = tk.Entry(opt, width=18, bg=p["SUNKEN"], fg=p["WHITE"],
+                                        insertbackground=p["WHITE"], relief="flat",
+                                        font=FONT_UI, highlightthickness=0, bd=0)
+            self.drive_entry.grid(row=0, column=1, sticky="w", pady=4, ipady=3)
+
         self.drive_entry.insert(0, self.current_drive)
-        self.drive_entry.grid(row=0, column=1, sticky="w", pady=4)
 
         self._mkbtn(opt, "SCAN", self.scan_drive, w=6).grid(row=0, column=2, padx=(6, 0), pady=4)
 
         tk.Label(opt, text="Format", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=3, sticky="w", padx=(20, 4), pady=4)
-        fmt_menu = tk.OptionMenu(opt, self.format_var, "MP3", "OGG", "FLAC", "WAV")
-        fmt_menu.config(bg=p["RAISED"], fg=p["WHITE"],
-                        activebackground=p["ACCENT"], activeforeground=p["WHITE"],
-                        highlightthickness=0, bd=1, relief="raised",
-                        font=FONT_UI_B, width=6)
-        fmt_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
-                                activebackground=p["ACCENT"],
-                                activeforeground=p["WHITE"], font=FONT_UI)
-        fmt_menu.grid(row=0, column=4, sticky="w", pady=4)
+
+        if IS_MAC:
+            fmt_menu = FlatOptionMenu(opt, self.format_var,
+                                      ["MP3", "OGG", "FLAC", "WAV"],
+                                      palette=p, width=6)
+            fmt_menu.grid(row=0, column=4, sticky="w", pady=4)
+        else:
+            fmt_menu = tk.OptionMenu(opt, self.format_var, "MP3", "OGG", "FLAC", "WAV")
+            fmt_menu.config(bg=p["RAISED"], fg=p["WHITE"],
+                            activebackground=p["ACCENT"], activeforeground=p["WHITE"],
+                            highlightthickness=0, bd=1, relief="raised",
+                            font=FONT_UI_B, width=6)
+            fmt_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
+                                    activebackground=p["ACCENT"],
+                                    activeforeground=p["WHITE"], font=FONT_UI)
+            fmt_menu.grid(row=0, column=4, sticky="w", pady=4)
 
         tk.Label(opt, text="Bitrate", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).grid(row=0, column=5, sticky="w", padx=(20, 4), pady=4)
-        bit_menu = tk.OptionMenu(opt, self.bitrate_var, "128", "192", "256", "320")
-        bit_menu.config(bg=p["RAISED"], fg=p["WHITE"],
-                        activebackground=p["ACCENT"], activeforeground=p["WHITE"],
-                        highlightthickness=0, bd=1, relief="raised",
-                        font=FONT_UI_B, width=5)
-        bit_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
-                                activebackground=p["ACCENT"],
-                                activeforeground=p["WHITE"], font=FONT_UI)
-        bit_menu.grid(row=0, column=6, sticky="w", pady=4)
+
+        if IS_MAC:
+            bit_menu = FlatOptionMenu(opt, self.bitrate_var,
+                                      ["128", "192", "256", "320"],
+                                      palette=p, width=5)
+            bit_menu.grid(row=0, column=6, sticky="w", pady=4)
+        else:
+            bit_menu = tk.OptionMenu(opt, self.bitrate_var, "128", "192", "256", "320")
+            bit_menu.config(bg=p["RAISED"], fg=p["WHITE"],
+                            activebackground=p["ACCENT"], activeforeground=p["WHITE"],
+                            highlightthickness=0, bd=1, relief="raised",
+                            font=FONT_UI_B, width=5)
+            bit_menu["menu"].config(bg=p["RAISED"], fg=p["WHITE"],
+                                    activebackground=p["ACCENT"],
+                                    activeforeground=p["WHITE"], font=FONT_UI)
+            bit_menu.grid(row=0, column=6, sticky="w", pady=4)
 
         tk.Checkbutton(opt, text="Eject when done", variable=self.eject_var,
                        bg=p["PANEL"], fg=p["WHITE"],
@@ -1536,7 +1894,7 @@ class App:
                        bd=0, highlightthickness=0
                        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=(10, 0), pady=(2, 6))
 
-        # Output directory -----------------------------------------------
+        # Output directory
         od = tk.Frame(parent, bg=p["PANEL"])
         od.pack(fill="x", padx=8, pady=(0, 4))
         tk.Label(od, text="Output", font=FONT_UI_B,
@@ -1547,7 +1905,7 @@ class App:
         self.outdir_label.pack(side="left", fill="x", expand=True, ipady=3)
         self._mkbtn(od, "…", self.pick_outdir, w=3).pack(side="right", padx=(4, 0))
 
-        # Track list -----------------------------------------------------
+        # Track list
         list_frame = tk.Frame(parent, bg=p["PANEL"])
         list_frame.pack(fill="both", expand=True, padx=8, pady=(4, 4))
 
@@ -1584,14 +1942,14 @@ class App:
         self._bind_mousewheel(self.track_canvas)
         self._bind_mousewheel(self.track_inner)
 
-        # Progress bar ---------------------------------------------------
+        # Progress bar
         prog = tk.Frame(parent, bg=p["PANEL"])
         prog.pack(fill="x", padx=8, pady=(0, 4))
         self.progress = tk.Canvas(prog, height=14, bg=p["SUNKEN"], highlightthickness=0)
         self.progress.pack(fill="x")
         self.progress.bind("<Configure>", lambda e: self._draw_progress(self._progress_value))
 
-        # Action buttons ------------------------------------------------
+        # Action buttons
         brow = tk.Frame(parent, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 4))
         self.btn_rip = self._mkbtn(brow, "RIP ALL", self.rip_all, w=10)
@@ -1603,14 +1961,14 @@ class App:
         self.btn_open_out = self._mkbtn(brow, "OPEN FOLDER", self.open_outdir, w=12)
         self.btn_open_out.pack(side="right", padx=(4, 10))
 
-        # Status bar ----------------------------------------------------
+        # Status bar
         self.status = tk.Label(parent, text="Ready.",
                                font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"], anchor="w")
         self.status.pack(fill="x", side="bottom")
 
         self._render_tracks()
 
-    # -- Mousewheel bindings for the track list ---------------------------
+    # --- Mousewheel ------------------------------------------------------
     def _bind_mousewheel(self, widget):
         widget.bind("<MouseWheel>", self._on_track_mousewheel)
         widget.bind("<Button-4>", self._on_track_mousewheel)
@@ -1629,7 +1987,7 @@ class App:
             pass
         return "break"
 
-    # -- Palette ----------------------------------------------------------
+    # --- Palette / alpha -------------------------------------------------
     def apply_accent(self, accent_hex):
         self.accent = accent_hex
         self.palette = build_palette(accent_hex)
@@ -1648,14 +2006,12 @@ class App:
             pass
 
         self._persist_settings()
-        # Apply alpha to any open Toplevels too
         self._apply_alpha_to_windows()
 
     def _on_alpha_cmd(self, v):
         self._apply_alpha_to_windows()
         self._persist_settings()
 
-    # -- Alpha propagation to all Toplevels ------------------------------
     def _apply_alpha_to_windows(self):
         try:
             a = float(self.alpha_scale.get()) / 100.0
@@ -1668,8 +2024,6 @@ class App:
         except Exception:
             pass
 
-        # Collect all Toplevels recursively, so nested windows like the
-        # License window (child of Info) also get their alpha updated.
         all_toplevels = []
 
         def _collect(widget):
@@ -1683,7 +2037,6 @@ class App:
 
         _collect(self.root)
 
-        # Also include explicitly registered extras
         for w in list(getattr(self, "_extra_alpha_windows", [])):
             try:
                 if w.winfo_exists() and w not in all_toplevels:
@@ -1698,7 +2051,7 @@ class App:
             except Exception:
                 pass
 
-    # -- Info / Theme -----------------------------------------------------
+    # --- Info / Theme ----------------------------------------------------
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
         self._apply_alpha_to_windows()
@@ -1707,7 +2060,7 @@ class App:
         ThemeWindow(self.root, self)
         self._apply_alpha_to_windows()
 
-    # -- Settings ---------------------------------------------------------
+    # --- Settings --------------------------------------------------------
     def _persist_settings(self):
         state = {
             "accent": self.accent,
@@ -1720,24 +2073,25 @@ class App:
         }
         save_settings(state)
 
-    # -- Startup ----------------------------------------------------------
+    # --- Startup ---------------------------------------------------------
     def _startup_check(self):
         p = self.palette
         msgs = []
         if not self.ffmpeg:
             msgs.append("ffmpeg missing (required)")
-        if self.is_windows and not self.ffprobe:
-            msgs.append("ffprobe missing (required on Windows)")
-        if not self.is_windows and not _PYCDIO_AVAILABLE:
-            msgs.append("pycdio missing (install libcdio + pycdio)")
+        if not self.backend.is_available():
+            msgs.append(self.backend.availability_hint() or
+                        f"{self.backend.name} backend unavailable")
         if msgs:
             self.status.config(text="Warning: " + " | ".join(msgs), fg=p["ERR"])
         else:
-            backend = "ffmpeg-libcdio" if self.is_windows else "pycdio"
             src = "bundled" if hasattr(sys, "_MEIPASS") else "system"
-            self.status.config(text=f"Ready. Backend: {backend} ({src}).", fg=p["GRAY"])
+            self.status.config(
+                text=f"Ready. Backend: {self.backend.name} ({src}).",
+                fg=p["GRAY"],
+            )
 
-    # -- Drive scanning ---------------------------------------------------
+    # --- Drive scanning --------------------------------------------------
     def scan_drive(self):
         p = self.palette
         drive = self.drive_entry.get().strip() or self.current_drive
@@ -1751,27 +2105,17 @@ class App:
             self.status.config(text="ffmpeg not found.", fg=p["ERR"])
             return
 
-        if not self.is_windows and not _PYCDIO_AVAILABLE:
-            self.status.config(
-                text="pycdio not installed — install libcdio + pycdio.",
-                fg=p["ERR"])
-            messagebox.showerror(
-                "pycdio not available",
-                "This tool requires the 'pycdio' module on Linux/macOS.\n\n"
-                "Install:\n"
-                "  Linux:   sudo apt install libcdio-dev libcdio-cdda-dev python3-pycdio\n"
-                "  macOS:   brew install libcdio && pip install pycdio"
-            )
+        if not self.backend.is_available():
+            hint = self.backend.availability_hint() or "Backend unavailable."
+            self.status.config(text=hint, fg=p["ERR"])
+            messagebox.showerror("CD backend unavailable", hint)
             return
 
         self.status.config(text=f"Scanning {drive} …", fg=p["GRAY"])
         self.root.update_idletasks()
 
         try:
-            if self.is_windows:
-                tracks = ffmpeg_list_tracks_windows(self.ffmpeg, drive)
-            else:
-                tracks = pycdio_list_tracks(drive)
+            tracks = self.backend.list_tracks(drive)
         except Exception as e:
             self.status.config(text=f"Scan failed: {e}", fg=p["ERR"])
             return
@@ -1788,7 +2132,7 @@ class App:
         self._render_tracks()
         self._persist_settings()
 
-    # -- Track rendering --------------------------------------------------
+    # --- Track rendering -------------------------------------------------
     def _render_tracks(self):
         p = self.palette
         if not hasattr(self, "track_inner") or self.track_inner is None:
@@ -1845,7 +2189,7 @@ class App:
         except Exception:
             pass
 
-    # -- Output ------------------------------------------------------------
+    # --- Output ----------------------------------------------------------
     def pick_outdir(self):
         d = filedialog.askdirectory(title="Choose output folder",
                                     initialdir=self.current_outdir or os.path.expanduser("~"))
@@ -1860,16 +2204,16 @@ class App:
             self.status.config(text="Output folder does not exist.", fg=self.palette["ERR"])
             return
         try:
-            if sys.platform == "win32":
+            if IS_WINDOWS:
                 os.startfile(d)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
+            elif IS_MAC:
                 subprocess.Popen(["open", d])
             else:
                 subprocess.Popen(["xdg-open", d])
         except Exception as e:
             self.status.config(text=f"Open failed: {e}", fg=self.palette["ERR"])
 
-    # -- Ripping -----------------------------------------------------------
+    # --- Ripping ---------------------------------------------------------
     def _ensure_ready(self, tracks):
         p = self.palette
         if self.ripping:
@@ -1878,14 +2222,15 @@ class App:
         if not self.ffmpeg:
             self.status.config(text="ffmpeg not found.", fg=p["ERR"])
             return False
+        if not self.backend.is_available():
+            hint = self.backend.availability_hint() or "Backend unavailable."
+            self.status.config(text=hint, fg=p["ERR"])
+            return False
         if not tracks:
             self.status.config(text="No tracks selected.", fg=p["ERR"])
             return False
         if not self.current_outdir:
             self.status.config(text="Please choose an output folder.", fg=p["ERR"])
-            return False
-        if not self.is_windows and not _PYCDIO_AVAILABLE:
-            self.status.config(text="pycdio not available.", fg=p["ERR"])
             return False
         os.makedirs(self.current_outdir, exist_ok=True)
         return True
@@ -1930,17 +2275,15 @@ class App:
         self._draw_progress(0.0)
         self.status.config(text="Ripping…", fg=self.palette["GRAY"])
 
+        backend = self.backend  # bind for the thread
+
         def worker():
-            if self.is_windows:
-                rip_worker_ffmpeg_windows(job, self.ui_queue)
-            else:
-                rip_worker_pycdio(job, self.ui_queue)
+            rip_worker(job, backend, self.ui_queue)
 
         self.worker_thread = threading.Thread(target=worker, daemon=True)
         self.worker_thread.start()
 
     def cancel_rip(self):
-        """Signal the worker to stop. Kills ffmpeg, removes partial file."""
         if not self.ripping:
             return
         try:
@@ -1950,7 +2293,7 @@ class App:
         except Exception as e:
             print(f"[XZN-CDR] Cancel failed: {e}")
 
-    # -- Progress bar ------------------------------------------------------
+    # --- Progress bar ----------------------------------------------------
     def _draw_progress(self, value):
         c = self.progress
         p = self.palette
@@ -1968,7 +2311,7 @@ class App:
             c.create_text(w // 2, h // 2, text=self._progress_label,
                           font=("Helvetica", 8), fill=p["WHITE"])
 
-    # -- UI queue polling --------------------------------------------------
+    # --- UI queue polling ------------------------------------------------
     def _poll_ui_queue(self):
         try:
             while True:
@@ -2001,7 +2344,7 @@ class App:
     def _finish_rip_ok(self):
         self.ripping = False
 
-    # -- Shutdown ----------------------------------------------------------
+    # --- Shutdown --------------------------------------------------------
     def on_close(self):
         if self.ripping:
             if not messagebox.askyesno(
@@ -2036,6 +2379,7 @@ def main():
     print(f"[XZN-CDR] Platform: {sys.platform}")
     print(f"[XZN-CDR] Frozen: {hasattr(sys, '_MEIPASS')}")
     print(f"[XZN-CDR] pycdio available: {_PYCDIO_AVAILABLE}")
+    print(f"[XZN-CDR] cd-paranoia: {find_cdparanoia() or 'NOT FOUND'}")
     print(f"[XZN-CDR] ffmpeg: {find_ffmpeg() or 'NOT FOUND'}")
     print(f"[XZN-CDR] ffprobe: {find_ffprobe() or 'NOT FOUND'}")
     print(f"[XZN-CDR] Settings: {SETTINGS_PATH}")
