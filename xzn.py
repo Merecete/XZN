@@ -422,14 +422,35 @@ def _make_gradient_bg(w, h, palette):
 
 
 def load_background(w, h, palette, custom_path=None):
+    """
+    Load a background image, checking several locations:
+
+    1. A user-supplied custom path (set via the BG button).
+    2. Bundled resources via resource_path() — works both from source
+       and from a PyInstaller build.
+    3. Files next to the script/executable in the current working dir.
+
+    If none of these exist, fall back to the generated gradient.
+    """
     candidates = []
+
     if custom_path:
         candidates.append(custom_path)
+
     for name in ("bg.png", "bg.jpg", "bg.jpeg", "background.png", "background.jpg"):
+        # Bundled / source location (via sys._MEIPASS when frozen)
+        candidates.append(resource_path(name))
+        # Working directory, so users can drop a bg next to the exe
+        candidates.append(os.path.join(os.getcwd(), name))
+        # Original script dir (works when running from source)
         candidates.append(os.path.join(SCRIPT_DIR, name))
 
+    seen = set()
     for p in candidates:
-        if p and os.path.isfile(p):
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        if os.path.isfile(p):
             try:
                 img = Image.open(p).convert("RGB")
                 iw, ih = img.size
@@ -439,6 +460,7 @@ def load_background(w, h, palette, custom_path=None):
                 left = (nw - w) // 2
                 top_ = (nh - h) // 2
                 img = img.crop((left, top_, left + w, top_ + h))
+                print(f"[XZN] Loaded background: {p}")
                 return img
             except Exception as e:
                 print(f"[XZN] Failed to load BG ({p}): {e}")
