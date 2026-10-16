@@ -11,7 +11,7 @@ Unified codebase — one file, three platforms, three CD backends:
 - Linux   : pycdio              (libcdio + pycdio packages)
 - macOS   : cd-paranoia         (brew install libcdio-paranoia)
 
-The GUI, theming, alpha handling, cancel logic and license window are
+The GUI, theming, alpha handling, stop logic and license window are
 shared across all platforms. Only the CD-access layer differs and is
 selected at runtime by make_backend().
 
@@ -426,6 +426,16 @@ class CancelledError(Exception):
 
 
 def _kill_process(proc):
+    """
+    Force-stop a subprocess, even if it is blocked reading from a CD.
+    Closing stderr first makes the caller's 'for line in proc.stderr'
+    loop end immediately instead of waiting for the next line.
+    """
+    try:
+        if proc.stderr is not None:
+            proc.stderr.close()
+    except Exception:
+        pass
     try:
         proc.terminate()
     except Exception:
@@ -435,6 +445,10 @@ def _kill_process(proc):
     except Exception:
         try:
             proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1)
         except Exception:
             pass
 
@@ -1151,7 +1165,7 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
             zip(job.tracks, job.track_durations), start=1
         ):
             if job.is_cancelled():
-                ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
+                ui_queue.put(("stopped", f"Stopped after {ripped} track(s)."))
                 return
 
             out_name = f"track_{track_no:02d}{job.extension()}"
@@ -1178,7 +1192,7 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
                     is_last_track=is_last,
                 )
             except CancelledError:
-                ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
+                ui_queue.put(("stopped", f"Stopped after {ripped} track(s)."))
                 return
             except Exception as e:
                 raise RuntimeError(f"Failed to rip track {track_no}: {e}")
@@ -1188,7 +1202,7 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
             ui_queue.put(("log", f"  -> {out_name}"))
 
         if job.is_cancelled():
-            ui_queue.put(("cancelled", f"Cancelled after {ripped} track(s)."))
+            ui_queue.put(("stopped", f"Stopped after {ripped} track(s)."))
             return
 
         if job.eject:
@@ -1953,7 +1967,7 @@ class App:
         self.btn_rip.pack(side="left", padx=(10, 4))
         self.btn_rip_sel = self._mkbtn(brow, "RIP SELECTED", self.rip_selected, w=14)
         self.btn_rip_sel.pack(side="left", padx=(0, 4))
-        self.btn_cancel = self._mkbtn(brow, "CANCEL", self.cancel_rip, w=8)
+        self.btn_cancel = self._mkbtn(brow, "STOP", self.cancel_stop, w=8)
         self.btn_cancel.pack(side="left", padx=(0, 4))
         self.btn_open_out = self._mkbtn(brow, "OPEN FOLDER", self.open_outdir, w=12)
         self.btn_open_out.pack(side="right", padx=(4, 10))
@@ -2271,6 +2285,10 @@ class App:
         self._progress_label = ""
         self._draw_progress(0.0)
         self.status.config(text="Ripping…", fg=self.palette["GRAY"])
+        try:
+            self.btn_cancel.config(text="STOP", relief="raised")
+        except Exception:
+            pass
 
         backend = self.backend  # bind for the thread
 
@@ -2280,15 +2298,24 @@ class App:
         self.worker_thread = threading.Thread(target=worker, daemon=True)
         self.worker_thread.start()
 
-    def cancel_rip(self):
+    def cancel_stop(self):
+        """
+        Ask the worker to stop. Already finished tracks are kept on disk.
+        The track currently being ripped is aborted and its partial file
+        removed.
+        """
         if not self.ripping:
             return
         try:
             if self._cancel_event is not None:
                 self._cancel_event.set()
-            self.status.config(text="Cancelling…", fg=self.palette["ERR"])
+            self.status.config(
+                text="Stopping…",
+                fg=self.palette["GRAY"],
+            )
+            self.btn_cancel.config(text="STOPPING…", relief="sunken")
         except Exception as e:
-            print(f"[XZN-CDR] Cancel failed: {e}")
+            print(f"[XZN-CDR] Stop failed: {e}")
 
     # --- Progress bar ----------------------------------------------------
     def _draw_progress(self, value):
@@ -2325,9 +2352,9 @@ class App:
                     msg = rest[0]
                     self.status.config(text=msg, fg=self.palette["GRAY"])
                     self._finish_rip_ok()
-                elif kind == "cancelled":
+                elif kind == "stopped":
                     msg = rest[0]
-                    self.status.config(text=msg, fg=self.palette["ERR"])
+                    self.status.config(text=msg, fg=self.palette["GRAY"])
                     self._finish_rip_ok()
                 elif kind == "error":
                     msg = rest[0]
@@ -2340,6 +2367,10 @@ class App:
 
     def _finish_rip_ok(self):
         self.ripping = False
+        try:
+            self.btn_cancel.config(text="STOP", relief="raised")
+        except Exception:
+            pass
 
     # --- Shutdown --------------------------------------------------------
     def on_close(self):
