@@ -34,7 +34,7 @@ Mac: `cd-paranoia` | `brew install libcdio-paranoia ffmpeg`
 ## Installation
 
 ```bash
-# Windows:
+## Windows:
 
 git clone https://github.com/Merecete/Xenon-Zones.git
 
@@ -46,7 +46,7 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
-# Linux:
+##  Linux:
 
 git clone https://github.com/Merecete/Xenon-Zones.git
 
@@ -58,12 +58,11 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-# macOS:
+## macOS:
 
 git clone https://github.com/Merecete/Xenon-Zones.git
 
 cd Xenon-Zones/xzn-cdr
-
 
 Install the two native tools via Homebrew: brew install libcdio-paranoia ffmpeg
 if you don't have Homebrew:
