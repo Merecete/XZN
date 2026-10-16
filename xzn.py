@@ -91,7 +91,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "Alpha 1.0"
+VERSION = "1.0.0"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
