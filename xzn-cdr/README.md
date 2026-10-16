@@ -36,7 +36,6 @@ Mac: `cd-paranoia` | `brew install libcdio-paranoia ffmpeg`
 ```bash
 
 git clone https://github.com/Merecete/Xenon-Zones.git
-
 cd Xenon-Zones/xzn-cdr
 
 
@@ -48,6 +47,7 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
+
 ##  Linux:
 
 python3 -m venv .venv
@@ -55,6 +55,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+
 
 ## macOS:
 
