@@ -1,46 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v5.4
-=======================
-- Transparency (Alpha) applies to main, info, theme and EQ windows
-- Video window always stays fully opaque (even in fullscreen)
-- Drag & Drop for the playlist (via tkinterdnd2, optional)
-- Playlist scrollbar styled like VOL/BAL (as tk.Scale)
-- Full 10-band equalizer (Winamp style) as its own window
-- Gradient background & glow effects in the original look
-- Robust video window control & playlist persistence
-- Fix: tracks are no longer truncated at the end (ring drain)
-- UI fully localized in English
-- Custom borderless BG popup menu (no native white frame)
-- Extended Info window with tagline, credits and copyright
-- Auto-save playlist on every change (crash-safe)
-- Export playlist as .m3u / import .m3u and .m3u8
-- v4.6: macOS-compatible buttons (Label-based on darwin)
-- v4.6: Playlist reordering via ▲ / ▼ buttons (rebuilds listbox)
-- v4.6: All windows (EQ, Info, Theme) now use macOS-safe buttons
-- v4.7: macOS menu cleaned up (no File/Edit/Window/Help)
-        About entry opens the custom Info window
-- v4.8: Hero bottom fade now baked into the image (fixes macOS
-        where Tk's stipple is ignored and the overlay looked cut off)
-- v4.9: EQ preset dropdown now uses FlatOptionMenu (macOS-safe)
-- v5.0: Tag editor via right-click on a playlist entry (mutagen)
-- v5.1: Logo shown in the Info window (top-left)
-- v5.2: Full MIT license text shown from a button in the Info window
-        Close button always visible; alpha applied to the license window
-- v5.3: macOS menubar now shared with all dialogs (Info, Theme, EQ,
-        Tag editor, License, Video) so the default Tk menu
-        (Python / File / Edit / Window / Help) no longer appears
-        when a dialog gets focus.
-- v5.4: Video window now shows a proper idle card when no video
-        frame is available (audio-only, before first frame):
-        big XZN logo centered, optional track title underneath.
-        No more plain black rectangle with a stray Courier "XZN".
-        Track title uses the same font as the playlist (Courier New 9)
-        and sits with a comfortable gap below the logo.
+Xenon-Zones (XZN) v1.0.0
+========================
+A lightweight media player in classic Winamp style.
+
+Features
+--------
+- Plays audio and video (via PyAV)
+- Playlist with drag & drop, reordering, and .m3u / .m3u8 import/export
+- 10-band Winamp-style equalizer with presets
+- Audio analyzer / spectrum display
+- Video window with idle card (logo shown when no video frame)
+- Tag editor for audio files (via mutagen)
+- Accent color theming and alpha transparency
+- Auto-saves playlist and settings (crash-safe)
+
+Platform notes
+--------------
+- Fully cross-platform (Windows, Linux, macOS)
+- macOS: shared menubar across all dialogs; label-based buttons
+- Optional: drag & drop needs `tkinterdnd2`; tag editing needs `mutagen`
 
 Copyright (c) 2026 Merecete
-
 Released under the MIT License. See LICENSE file for details.
 """
 import os
