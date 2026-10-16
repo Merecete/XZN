@@ -658,11 +658,15 @@ class FFmpegBackend(CDBackend):
         else:
             codec_args = ["-c:a", "copy"]
 
+        # The `-ss 0` before `-i` forces libcdio to initialize the stream
+        # at sector 0. Without it, ffmpeg can hang mid-read on some Windows
+        # builds when only a post-input `-ss` is used.
         cmd = [
             self.ffmpeg,
             "-y",
             "-f", "libcdio",
             "-paranoia_mode", "full",
+            "-ss", "0",
             "-i", drive,
             "-ss", str(start_sec),
             "-t", str(effective_duration),
