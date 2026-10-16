@@ -170,10 +170,9 @@ EQ_PRESETS = {
     "Jazz":      [4, 3, 1, 2, -1, -1, 0, 2, 3, 4],
     "Classical": [4, 3, 2, 0, 0, 0, -2, -3, -3, -4],
     "Bass":      [8, 7, 5, 2, 0, 0, 0, 0, 0, 0],
-    "Treble":    [0, 0, 0, 0, 0, 0, 2, 4, 6, 7, 8],
+    "Treble":    [0, 0, 0, 0, 0, 2, 4, 6, 7, 8],
     "Vocal":     [-2, -1, 2, 4, 5, 4, 2, 0, -1, -2],
 }
-EQ_PRESETS["Treble"] = [0, 0, 0, 0, 0, 2, 4, 6, 7, 8]
 
 
 # ------------------------------------------------------------------------
@@ -2443,6 +2442,86 @@ class TagEditorWindow:
 
 
 # ------------------------------------------------------------------------
+# Global registry for borderless popups that close on outside click.
+#
+# Instead of each popup installing its own global binding (which leaks
+# Tk bindings over time), we install ONE binding per Tk root, and keep
+# a set of currently open popups. The handler walks that set and closes
+# anything the click missed.
+# ------------------------------------------------------------------------
+_POPUP_REGISTRY = {}
+
+
+def register_popup(root_widget, popup_win):
+    """Track a borderless popup so the global click handler can close it."""
+    reg = _POPUP_REGISTRY.setdefault(root_widget, set())
+    reg.add(popup_win)
+
+
+def unregister_popup(root_widget, popup_win):
+    reg = _POPUP_REGISTRY.get(root_widget)
+    if reg is not None:
+        reg.discard(popup_win)
+        if not reg:
+            _POPUP_REGISTRY.pop(root_widget, None)
+
+
+def _install_popup_click_handler(root_widget):
+    """
+    Install the single global click handler for a Tk root.
+    Safe to call multiple times: Tk would add duplicate bindings, so we
+    tag the root with a flag once we've installed it.
+    """
+    if getattr(root_widget, "_xzn_popup_handler_installed", False):
+        return
+    try:
+        root_widget.bind_all(
+            "<Button-1>",
+            lambda e, r=root_widget: _on_any_click(r, e),
+            add="+",
+        )
+        root_widget._xzn_popup_handler_installed = True
+    except Exception as e:
+        print(f"[XZN] popup handler install failed: {e}")
+
+
+def _on_any_click(root_widget, event):
+    reg = _POPUP_REGISTRY.get(root_widget)
+    if not reg:
+        return
+    try:
+        clicked = root_widget.winfo_containing(event.x_root, event.y_root)
+    except Exception:
+        clicked = None
+
+    for popup in list(reg):
+        try:
+            if not popup.winfo_exists():
+                reg.discard(popup)
+                continue
+            # Walk up the widget tree from the click target, looking for
+            # the popup window itself.
+            p = clicked
+            inside = False
+            while p is not None:
+                if p is popup:
+                    inside = True
+                    break
+                try:
+                    p = p.master
+                except Exception:
+                    p = None
+            if not inside:
+                try:
+                    popup.destroy()
+                except Exception:
+                    pass
+                reg.discard(popup)
+        except Exception:
+            reg.discard(popup)
+
+
+# ------------------------------------------------------------------------
 class BgPopup:
     def __init__(self, app, x, y):
         self.app = app
@@ -2491,29 +2570,12 @@ class BgPopup:
 
         self.win.bind("<FocusOut>", lambda e: self.close())
         self.win.bind("<Escape>", lambda e: self.close())
-        self._bind_id = app.root.bind_all("<Button-1>",
-                                          self._on_global_click, add="+")
+        register_popup(app.root, self.win)
+        _install_popup_click_handler(app.root)
         try:
             self.win.focus_set()
         except Exception:
             pass
-
-    def _on_global_click(self, event):
-        if self._destroyed:
-            return
-        try:
-            w = self.app.root.winfo_containing(event.x_root, event.y_root)
-        except Exception:
-            w = None
-        p = w
-        while p is not None:
-            if p is self.win:
-                return
-            try:
-                p = p.master
-            except Exception:
-                p = None
-        self.close()
 
     def _choose(self):
         self.close()
@@ -2527,13 +2589,7 @@ class BgPopup:
         if self._destroyed:
             return
         self._destroyed = True
-        bid = getattr(self, "_bind_id", None)
-        if bid is not None:
-            try:
-                self.app.root.unbind_all("<Button-1>")
-            except Exception:
-                pass
-            self._bind_id = None
+        unregister_popup(self.app.root, self.win)
         try:
             self.win.destroy()
         except Exception:
@@ -3203,8 +3259,16 @@ class App:
         if can_edit:
             item.bind("<Enter>", lambda e: item.config(bg=p["ACCENT"], fg=p["WHITE"]))
             item.bind("<Leave>", lambda e: item.config(bg=p["RAISED"], fg=p["WHITE"]))
-            item.bind("<Button-1>",
-                      lambda e: (popup.destroy(), self.open_tag_editor(path)))
+
+            def _open_editor(_e=None, _p=path, _popup=popup):
+                unregister_popup(self.root, _popup)
+                try:
+                    _popup.destroy()
+                except Exception:
+                    pass
+                self.open_tag_editor(_p)
+
+            item.bind("<Button-1>", _open_editor)
         else:
             # Explain why it's greyed out
             if not _MUTAGEN_AVAILABLE:
@@ -3216,24 +3280,22 @@ class App:
         y = event.y_root
         popup.geometry(f"+{x}+{y}")
 
-        def _close(_e=None):
+        def _close_popup(_e=None):
+            unregister_popup(self.root, popup)
             try:
                 popup.destroy()
             except Exception:
                 pass
 
-        popup.bind("<FocusOut>", _close)
-        popup.bind("<Escape>", _close)
+        popup.bind("<FocusOut>", _close_popup)
+        popup.bind("<Escape>", _close_popup)
+        register_popup(self.root, popup)
+        _install_popup_click_handler(self.root)
+
         try:
             popup.focus_set()
         except Exception:
             pass
-
-        # Close on click outside
-        bind_id = self.root.bind_all("<Button-1>",
-                                     lambda e: _maybe_close_outside(e, popup),
-                                     add="+")
-        popup._xzn_bind_id = bind_id
 
     def open_tag_editor(self, path):
         """Open the tag editor for the given file path."""
@@ -3999,26 +4061,6 @@ class App:
         self._tick_fast()
         self._tick_mid()
         self.root.mainloop()
-
-
-def _maybe_close_outside(event, popup):
-    """Helper: close the tag-edit context popup when clicking elsewhere."""
-    try:
-        w = popup.winfo_containing(event.x_root, event.y_root)
-    except Exception:
-        w = None
-    p = w
-    while p is not None:
-        if p is popup:
-            return
-        try:
-            p = p.master
-        except Exception:
-            p = None
-    try:
-        popup.destroy()
-    except Exception:
-        pass
 
 
 def main():
