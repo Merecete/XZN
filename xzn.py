@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v5.2
+Xenon-Zones (XZN) v5.3
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -28,6 +28,10 @@ Xenon-Zones (XZN) v5.2
 - v5.1: Logo shown in the Info window (top-left)
 - v5.2: Full MIT license text shown from a button in the Info window
         Close button always visible; alpha applied to the license window
+- v5.3: macOS menubar now shared with all dialogs (Info, Theme, EQ,
+        Tag editor, License, Video) so the default Tk menu
+        (Python / File / Edit / Window / Help) no longer appears
+        when a dialog gets focus.
 
 Copyright (c) 2026 Merecete
 
@@ -1396,8 +1400,9 @@ class Player(threading.Thread):
 
 # ------------------------------------------------------------------------
 class VideoWindow:
-    def __init__(self, master):
+    def __init__(self, master, app=None):
         self.master = master
+        self.app = app
         self.win = tk.Toplevel(master)
         self.win.title("Video – XZN")
         self.win.configure(bg="#0a0812")
@@ -1407,6 +1412,14 @@ class VideoWindow:
         self.win.withdraw()
 
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel so the
+        # default Tk menu (Python/File/Edit/Window/Help) does not appear.
+        if app is not None:
+            try:
+                app._attach_macos_menu(self.win)
+            except Exception:
+                pass
 
         self.canvas = tk.Canvas(self.win, bg="#0a0812", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -1583,6 +1596,13 @@ def show_license_window(parent, palette, app=None):
     win.transient(parent)
     apply_window_icon(win)
 
+    # macOS: share the app's menubar with this Toplevel
+    if app is not None:
+        try:
+            app._attach_macos_menu(win)
+        except Exception:
+            pass
+
     # --- Close handler that also unregisters the window -----------------
     def _close():
         if app is not None:
@@ -1690,6 +1710,12 @@ class InfoWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
 
         p = palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
@@ -1807,6 +1833,12 @@ class ThemeWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
 
         p = app.palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=18, pady=16)
@@ -2011,6 +2043,13 @@ class EqualizerWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
+
         self._syncing = False
 
         p = self.palette
@@ -2176,6 +2215,12 @@ class TagEditorWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
 
         outer = tk.Frame(self.win, bg=p["PANEL"], padx=20, pady=18)
         outer.pack(fill="both", expand=True)
@@ -2440,7 +2485,7 @@ class App:
         self._extra_alpha_windows = []
 
         self._build_ui()
-        self._video_win = VideoWindow(self.root)
+        self._video_win = VideoWindow(self.root, self)
         self._video_win.apply_palette(self.palette)
         self._setup_dnd()
 
@@ -2483,17 +2528,41 @@ class App:
 
     # --- macOS menu ------------------------------------------------------
     def _setup_macos_menu(self):
+        """
+        On macOS, hide Tk's default menu entries (Python / File / Edit /
+        Window / Help) by giving the app an empty menubar. We also keep
+        a reference to it so every Toplevel can share the same menubar
+        — otherwise, focusing a dialog would make macOS switch back to
+        the default Tk menu set.
+        """
         if not IS_MAC:
             return
         try:
-            menubar = tk.Menu(self.root)
-            self.root.config(menu=menubar)
+            self._mac_menubar = tk.Menu(self.root)
+            self.root.config(menu=self._mac_menubar)
             self.root.createcommand(
                 "tk::mac::standardAboutPanel", self._show_mac_about
             )
             print("[XZN] macOS menu customized.")
         except Exception as e:
+            self._mac_menubar = None
             print(f"[XZN] macOS menu setup failed: {e}")
+
+    def _attach_macos_menu(self, win):
+        """
+        macOS only: share the app's menubar with a Toplevel, so that
+        focusing it does not switch the system menu to the default
+        Tk 'Python / File / Edit / Window / Help' entries.
+        """
+        if not IS_MAC:
+            return
+        mb = getattr(self, "_mac_menubar", None)
+        if mb is None:
+            return
+        try:
+            win.config(menu=mb)
+        except Exception as e:
+            print(f"[XZN] _attach_macos_menu failed: {e}")
 
     def _show_mac_about(self):
         try:
@@ -3533,7 +3602,7 @@ class App:
     def _toggle_video_window(self):
         try:
             if self._video_win is None or not self._video_win.is_alive():
-                self._video_win = VideoWindow(self.root)
+                self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
             if self._video_win.win.state() == "normal":
                 self._video_win.hide()
@@ -3546,7 +3615,7 @@ class App:
     def _toggle_video_fullscreen(self):
         try:
             if self._video_win is None or not self._video_win.is_alive():
-                self._video_win = VideoWindow(self.root)
+                self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
             self._video_win.show()
             self._video_win.toggle_fullscreen()
@@ -3622,7 +3691,7 @@ class App:
 
         if v is not None and self._video_win is not None:
             if not self._video_win.is_alive():
-                self._video_win = VideoWindow(self.root)
+                self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
             try:
                 self._video_win.fit_to_video(v[1], v[2])
