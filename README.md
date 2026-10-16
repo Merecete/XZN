@@ -30,16 +30,18 @@ A classic media player with a cyberpunk look, video, audio,
 git clone https://github.com/Merecete/Xenon-Zones.git
 cd Xenon-Zones
 
+
 # Windows:
 python -m venv .venv
+
+.venv\Scripts\activate
+
+pip install -r requirements.txt
+
 
 # Linux/macOS:
 python3 -m venv .venv
 
-# Windows:
-.venv\Scripts\activate
-
-# Linux/macOS:
 source .venv/bin/activate
 
 pip install -r requirements.txt
