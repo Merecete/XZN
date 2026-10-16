@@ -2596,14 +2596,41 @@ class BgPopup:
 
         self.win.geometry(f"+{x}+{y}")
 
-        self.win.bind("<FocusOut>", lambda e: self.close())
-        self.win.bind("<Escape>", lambda e: self.close())
-        register_popup(app.root, self.win)
-        _install_popup_click_handler(app.root)
+        # Do NOT call focus_set() on the popup. If we take focus on
+        # Windows, Tk may not deliver subsequent clicks to the BG
+        # button after this popup is destroyed. Instead, we listen for
+        # clicks on the root window and close ourselves when the click
+        # lands outside of us.
         try:
-            self.win.focus_set()
+            self._outside_bind_id = app.root.bind_all(
+                "<Button-1>", self._on_root_click, add="+"
+            )
         except Exception:
-            pass
+            self._outside_bind_id = None
+
+        self.win.bind("<Escape>", lambda e: self.close())
+
+    def _on_root_click(self, event):
+        """
+        Close the popup when the user clicks outside of it.
+        Runs on every root click; if the click was inside the popup we
+        ignore it, otherwise we close.
+        """
+        if self._destroyed:
+            return
+        try:
+            clicked = self.app.root.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            clicked = None
+        p = clicked
+        while p is not None:
+            if p is self.win:
+                return
+            try:
+                p = p.master
+            except Exception:
+                p = None
+        self.close()
 
     def _choose(self):
         # Clear the app's pointer *before* opening the file dialog so a
@@ -2624,8 +2651,15 @@ class BgPopup:
         if self._destroyed:
             return
         self._destroyed = True
-        # Unregister first so the click handler never sees a half-dead
-        # popup.
+        # Remove our per-popup root binding
+        bid = getattr(self, "_outside_bind_id", None)
+        if bid is not None:
+            try:
+                self.app.root.unbind_all("<Button-1>")
+            except Exception:
+                pass
+            self._outside_bind_id = None
+        # Unregister from the global registry (safety net)
         try:
             unregister_popup(self.app.root, self.win)
         except Exception:
@@ -3490,13 +3524,16 @@ class App:
     # --- BG popup --------------------------------------------------------
     def _bg_menu(self):
         """
-        Open a fresh BG popup.
-
-        We do NOT attempt to clean up a previous popup here — the global
-        click handler and the FocusOut binding already closed it as part
-        of the same click that reached this method. Just create the new
-        one.
+        Toggle the BG popup. If one is already open, close it.
+        Otherwise open a fresh one.
         """
+        if self._bg_popup is not None:
+            try:
+                self._bg_popup.close()
+            except Exception:
+                pass
+            self._bg_popup = None
+            return
         try:
             x = self.btn_bg.winfo_rootx()
             y = self.btn_bg.winfo_rooty() + self.btn_bg.winfo_height()
