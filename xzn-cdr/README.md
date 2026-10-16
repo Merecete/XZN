@@ -34,23 +34,43 @@ Mac: `cd-paranoia` | `brew install libcdio-paranoia ffmpeg`
 ## Installation
 
 ```bash
+# Windows:
+
 git clone https://github.com/Merecete/Xenon-Zones.git
+
 cd Xenon-Zones/xzn-cdr
 
-# Windows:
 python -m venv .venv
 
-# Linux/macOS:
-python3 -m venv .venv
-
-# Windows:
 .venv\Scripts\activate
 
-# Linux/macOS:
+pip install -r requirements.txt
+
+# Linux:
+
+git clone https://github.com/Merecete/Xenon-Zones.git
+
+cd Xenon-Zones/xzn-cdr
+
+python3 -m venv .venv
+
 source .venv/bin/activate
 
+pip install -r requirements.txt
+
 # macOS:
+
+git clone https://github.com/Merecete/Xenon-Zones.git
+
+cd Xenon-Zones/xzn-cdr
+
+
 Install the two native tools via Homebrew: brew install libcdio-paranoia ffmpeg
-( if you don't have Homebrew: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" )
+if you don't have Homebrew:
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" )
+
+python3 -m venv .venv
+
+source .venv/bin/activate
 
 pip install -r requirements.txt
