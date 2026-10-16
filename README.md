@@ -32,6 +32,7 @@ cd Xenon-Zones
 
 
 # Windows:
+
 python -m venv .venv
 
 .venv\Scripts\activate
@@ -40,6 +41,7 @@ pip install -r requirements.txt
 
 
 # Linux/macOS:
+
 python3 -m venv .venv
 
 source .venv/bin/activate
