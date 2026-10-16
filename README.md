@@ -31,7 +31,7 @@ git clone https://github.com/Merecete/Xenon-Zones.git
 cd Xenon-Zones
 
 
-# Windows:
+## Windows:
 
 python -m venv .venv
 
@@ -40,7 +40,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 
-# Linux/macOS:
+## Linux/macOS:
 
 python3 -m venv .venv
 
