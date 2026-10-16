@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR (macOS) v1.5
+XZN-CDR (macOS) v1.6
 ====================
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -28,6 +28,10 @@ v1.5:
 - MIT License window with full alpha transparency support
 - Dialog buttons (Info / Theme / License) now use the smaller
   Helvetica font, matching xzn.py's dialog style
+v1.6:
+- macOS menubar now shared with all dialogs (Info, Theme, License)
+  so the default Tk menu (Python / File / Edit / Window / Help)
+  no longer appears when a dialog gets focus
 
 Copyright (c) 2026 Merecete
 Released under the MIT License. See LICENSE file for details.
@@ -814,6 +818,13 @@ def show_license_window(parent, palette, app=None):
     win.transient(parent)
     apply_window_icon(win)
 
+    # macOS: share the app's menubar with this Toplevel
+    if app is not None:
+        try:
+            app._attach_macos_menu(win)
+        except Exception:
+            pass
+
     # --- Close handler that also unregisters the window -----------------
     def _close():
         if app is not None:
@@ -924,6 +935,12 @@ class ThemeWindow:
         self.win.transient(master)
         apply_window_icon(self.win)
 
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
+
         p = app.palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=18, pady=16)
         frame.pack(fill="both", expand=True)
@@ -1002,6 +1019,12 @@ class InfoWindow:
         self.win.resizable(False, False)
         self.win.transient(master)
         apply_window_icon(self.win)
+
+        # macOS: share the app's menubar with this Toplevel
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            pass
 
         p = palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
@@ -1159,17 +1182,41 @@ class App:
 
     # --- macOS menu ------------------------------------------------------
     def _setup_macos_menu(self):
+        """
+        On macOS, hide Tk's default menu entries (Python / File / Edit /
+        Window / Help) by giving the app an empty menubar. We also keep
+        a reference to it so every Toplevel can share the same menubar
+        — otherwise, focusing a dialog would make macOS switch back to
+        the default Tk menu set.
+        """
         if not IS_MAC:
             return
         try:
-            menubar = tk.Menu(self.root)
-            self.root.config(menu=menubar)
+            self._mac_menubar = tk.Menu(self.root)
+            self.root.config(menu=self._mac_menubar)
             self.root.createcommand(
                 "tk::mac::standardAboutPanel", self._show_mac_about
             )
             print("[XZN-CDR] macOS menu customized.")
         except Exception as e:
+            self._mac_menubar = None
             print(f"[XZN-CDR] macOS menu setup failed: {e}")
+
+    def _attach_macos_menu(self, win):
+        """
+        macOS only: share the app's menubar with a Toplevel, so that
+        focusing it does not switch the system menu to the default
+        Tk 'Python / File / Edit / Window / Help' entries.
+        """
+        if not IS_MAC:
+            return
+        mb = getattr(self, "_mac_menubar", None)
+        if mb is None:
+            return
+        try:
+            win.config(menu=mb)
+        except Exception as e:
+            print(f"[XZN-CDR] _attach_macos_menu failed: {e}")
 
     def _show_mac_about(self):
         try:
