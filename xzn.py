@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v5.1
+Xenon-Zones (XZN) v5.2
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -26,6 +26,8 @@ Xenon-Zones (XZN) v5.1
 - v4.9: EQ preset dropdown now uses FlatOptionMenu (macOS-safe)
 - v5.0: Tag editor via right-click on a playlist entry (mutagen)
 - v5.1: Logo shown in the Info window (top-left)
+- v5.2: Full MIT license text shown from a button in the Info window
+        Close button always visible; alpha applied to the license window
 
 Copyright (c) 2026 Merecete
 
@@ -90,6 +92,30 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 ICON_FILENAME = "xzn.ico"
 LOGO_FILENAME = "xzn-logo.png"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
+
+# --- Full MIT license text (for the Info window button) ----------------
+MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) 2026 Merecete
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
 
 # --- Default palette (dark bluish purple) -------------------------------
 DEFAULT_PALETTE = {
@@ -1540,9 +1566,124 @@ class VideoWindow:
 
 
 # ------------------------------------------------------------------------
+# License window (full MIT text)
+# ------------------------------------------------------------------------
+def show_license_window(parent, palette, app=None):
+    """
+    Open a small window showing the full MIT license text.
+    Read-only, scrollable, matching the app's look.
+    Registers itself with the app so the alpha slider affects it too.
+    """
+    p = palette
+    win = tk.Toplevel(parent)
+    win.title("License – XZN")
+    win.configure(bg=p["PANEL"])
+    win.geometry("620x520")
+    win.minsize(400, 300)
+    win.transient(parent)
+    apply_window_icon(win)
+
+    # --- Close handler that also unregisters the window -----------------
+    def _close():
+        if app is not None:
+            try:
+                if win in app._extra_alpha_windows:
+                    app._extra_alpha_windows.remove(win)
+            except Exception:
+                pass
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    win.protocol("WM_DELETE_WINDOW", _close)
+
+    # Footer FIRST, packed at the bottom, so it is always visible
+    footer = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    footer.pack(side="bottom", fill="x")
+
+    make_flat_button(footer, "Close", _close, palette=p,
+                     padx=14, pady=4).pack(side="right")
+
+    # Header (top)
+    header = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    header.pack(side="top", fill="x")
+
+    tk.Label(header, text="MIT LICENSE",
+             font=("Helvetica", 12, "bold"),
+             bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+
+    tk.Frame(win, bg=p["ACCENT_LO"], height=1).pack(
+        side="top", fill="x", padx=20
+    )
+
+    # Body (fills the rest)
+    body = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
+    body.pack(side="top", fill="both", expand=True)
+
+    text_wrap = tk.Frame(body, bg=p["SUNKEN"], bd=0, highlightthickness=0)
+    text_wrap.pack(fill="both", expand=True)
+
+    txt = tk.Text(
+        text_wrap,
+        wrap="word",
+        bg=p["SUNKEN"], fg=p["WHITE"],
+        insertbackground=p["WHITE"],
+        selectbackground=p["ACCENT"],
+        selectforeground=p["WHITE"],
+        relief="flat", bd=0, highlightthickness=0,
+        font=("Courier New", 9),
+        padx=14, pady=12,
+    )
+    txt.pack(side="left", fill="both", expand=True)
+
+    sb = tk.Scrollbar(text_wrap, command=txt.yview,
+                      bg=p["RAISED"], troughcolor=p["SUNKEN"],
+                      activebackground=p["ACCENT"],
+                      relief="flat", bd=0, highlightthickness=0,
+                      width=12)
+    sb.pack(side="right", fill="y")
+    txt.config(yscrollcommand=sb.set)
+
+    txt.insert("1.0", MIT_LICENSE_TEXT)
+    txt.config(state="disabled")
+
+    win.bind("<Escape>", lambda e: _close())
+
+    # Center on parent
+    try:
+        win.update_idletasks()
+        mx = parent.winfo_rootx() + parent.winfo_width() // 2
+        my = parent.winfo_rooty() + parent.winfo_height() // 2
+        w = win.winfo_width()
+        h = win.winfo_height()
+        win.geometry(f"+{mx - w // 2}+{my - h // 2}")
+    except Exception:
+        pass
+
+    # Register with the app so it participates in the alpha system,
+    # then apply the current alpha immediately.
+    if app is not None:
+        try:
+            app._extra_alpha_windows.append(win)
+        except Exception:
+            pass
+        try:
+            win.after(30, app._apply_alpha_to_windows)
+        except Exception:
+            pass
+
+    try:
+        win.focus_set()
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------------
 class InfoWindow:
-    def __init__(self, master, palette):
+    def __init__(self, master, palette, app):
         self.master = master
+        self.app = app
         self.win = tk.Toplevel(master)
         self.win.title("Info – XZN")
         self.win.configure(bg=palette["PANEL"])
@@ -1610,8 +1751,36 @@ class InfoWindow:
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
-        btn = make_flat_button(frame, "Close", self.win.destroy, palette=p)
-        btn.pack(anchor="e")
+        # --- Button row: License + Close ---
+        btn_row = tk.Frame(frame, bg=p["PANEL"])
+        btn_row.pack(anchor="e", fill="x")
+
+        make_flat_button(
+            btn_row, "License",
+            lambda: show_license_window(self.win, p, self.app),
+            palette=p, padx=10, pady=4
+        ).pack(side="left")
+
+        # --- Close handler that also unregisters ------------------------
+        def _close_info():
+            try:
+                if self.win in self.app._extra_alpha_windows:
+                    self.app._extra_alpha_windows.remove(self.win)
+            except Exception:
+                pass
+            try:
+                self.win.destroy()
+            except Exception:
+                pass
+
+        make_flat_button(
+            btn_row, "Close",
+            _close_info,
+            palette=p, padx=14, pady=4
+        ).pack(side="right")
+
+        self.win.protocol("WM_DELETE_WINDOW", _close_info)
+        self.win.bind("<Escape>", lambda e: _close_info())
 
         self.win.update_idletasks()
         mx = master.winfo_rootx() + master.winfo_width() // 2
@@ -1619,7 +1788,12 @@ class InfoWindow:
         w = self.win.winfo_width()
         h = self.win.winfo_height()
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
-        self.win.bind("<Escape>", lambda e: self.win.destroy())
+
+        # Register with the app for alpha participation
+        try:
+            self.app._extra_alpha_windows.append(self.win)
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------------
@@ -2261,6 +2435,9 @@ class App:
         self._frame_counter = 0
         self._dnd_widgets = []
         self._bg_popup = None
+        # Registry for toplevels that should follow the main window's alpha
+        # (used for nested windows like the License window)
+        self._extra_alpha_windows = []
 
         self._build_ui()
         self._video_win = VideoWindow(self.root)
@@ -2361,6 +2538,7 @@ class App:
         except Exception:
             pass
 
+        # Video window must always stay fully opaque
         video_win = None
         try:
             if self._video_win is not None and self._video_win.is_alive():
@@ -2375,10 +2553,35 @@ class App:
         except Exception:
             bg_popup_win = None
 
-        for w in list(self.root.winfo_children()):
-            if not isinstance(w, tk.Toplevel):
-                continue
+        # --- Collect ALL Toplevels recursively --------------------------
+        # This is the key fix: nested windows (e.g. License inside Info)
+        # are no longer missed.
+        all_toplevels = []
+
+        def _collect(widget):
+            try:
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Toplevel):
+                        all_toplevels.append(child)
+                    # Recurse regardless, so nested toplevels are found
+                    _collect(child)
+            except Exception:
+                pass
+
+        _collect(self.root)
+
+        # Also include explicitly registered extras (belt & suspenders)
+        for w in list(getattr(self, "_extra_alpha_windows", [])):
+            try:
+                if w.winfo_exists() and w not in all_toplevels:
+                    all_toplevels.append(w)
+            except Exception:
+                pass
+
+        for w in all_toplevels:
             if video_win is not None and w is video_win:
+                continue
+            if bg_popup_win is not None and w is bg_popup_win:
                 continue
             try:
                 if w.winfo_exists():
@@ -2386,6 +2589,7 @@ class App:
             except Exception:
                 pass
 
+        # Video window always fully opaque
         if video_win is not None:
             try:
                 video_win.attributes("-alpha", 1.0)
@@ -3033,7 +3237,7 @@ class App:
         self._persist_settings()
 
     def show_info(self):
-        InfoWindow(self.root, self.palette)
+        InfoWindow(self.root, self.palette, self)
         self._apply_alpha_to_windows()
 
     def show_theme(self):
