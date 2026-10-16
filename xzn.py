@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v5.3
+Xenon-Zones (XZN) v5.4
 =======================
 - Transparency (Alpha) applies to main, info, theme and EQ windows
 - Video window always stays fully opaque (even in fullscreen)
@@ -32,6 +32,12 @@ Xenon-Zones (XZN) v5.3
         Tag editor, License, Video) so the default Tk menu
         (Python / File / Edit / Window / Help) no longer appears
         when a dialog gets focus.
+- v5.4: Video window now shows a proper idle card when no video
+        frame is available (audio-only, before first frame):
+        big XZN logo centered, optional track title underneath.
+        No more plain black rectangle with a stray Courier "XZN".
+        Track title uses the same font as the playlist (Courier New 9)
+        and sits with a comfortable gap below the logo.
 
 Copyright (c) 2026 Merecete
 
@@ -1425,20 +1431,46 @@ class VideoWindow:
         self.canvas.pack(fill="both", expand=True)
 
         self._photo = None
+        self._idle_logo_photo = None
         self._last_gen = -1
         self._fullscreen = False
         self._normal_geometry = "960x540"
         self._last_canvas_size = (0, 0)
         self._scaled_cache = None
 
+        # Idle-card state (used so the resize handler can redraw it).
+        self._showing_idle_card = False
+        self._idle_primary = ""
+        self._idle_secondary = ""
+
         self.canvas.bind("<Double-Button-1>", self.toggle_fullscreen)
         self.win.bind("<Escape>", lambda e: self.exit_fullscreen())
+
+        # Redraw the idle card when the window is resized and no video
+        # frame is currently shown. Otherwise the card stays tiny.
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
 
     def is_alive(self):
         try:
             return bool(self.win.winfo_exists())
         except Exception:
             return False
+
+    def _on_canvas_configure(self, event=None):
+        """
+        If the canvas is currently showing the idle card, redraw it at
+        the new size. If a video frame is showing, do nothing.
+        """
+        try:
+            if self._scaled_cache is not None:
+                # Video is playing: let update_frame handle redraws.
+                return
+            if getattr(self, "_showing_idle_card", False):
+                primary = getattr(self, "_idle_primary", "")
+                secondary = getattr(self, "_idle_secondary", "")
+                self._draw_idle_card(primary, secondary)
+        except Exception:
+            pass
 
     def apply_palette(self, palette):
         try:
@@ -1459,6 +1491,20 @@ class VideoWindow:
                 pass
             self.win.deiconify()
             self.win.lift()
+
+            # If the canvas is empty (no frame shown yet), draw the idle
+            # card so the user never sees a plain black rectangle.
+            try:
+                if not self.canvas.find_all():
+                    title = ""
+                    if self.app is not None:
+                        try:
+                            title = self.app.player.title_text or ""
+                        except Exception:
+                            title = ""
+                    self._draw_idle_card("", title)
+            except Exception:
+                pass
         except Exception as e:
             print(f"[XZN] VideoWindow.show failed: {e}")
 
@@ -1526,20 +1572,117 @@ class VideoWindow:
             pass
         self._fullscreen = False
 
-    def show_placeholder(self):
+    def show_placeholder(self, primary_text="", secondary_text=""):
+        """
+        Show the XZN idle card. Called when no video frame is available
+        (start of playback, audio-only files, after stop).
+        """
+        self._photo = None
+        self._last_gen = -1
+        self._scaled_cache = None
+        self._showing_idle_card = True
+        self._idle_primary = primary_text
+        self._idle_secondary = secondary_text
+        self._draw_idle_card(primary_text, secondary_text)
+
+    def _draw_idle_card(self, primary_text="", secondary_text=""):
+        """
+        Draw the placeholder card shown when no video frame is available
+        (audio-only files, paused-at-start, or before the first frame).
+
+        Layout:
+            - Large centered XZN logo (xzn-logo.png). The logo already
+              contains the "XZN" wordmark, so we do NOT print it again.
+            - Fallback: if the logo file is missing, draw a simple "XZN"
+              wordmark instead, so the window never looks broken.
+            - Optional secondary line (track title / status) underneath,
+              using the same font as the playlist (Courier New 9).
+        """
         try:
             if not self.is_alive():
                 return
             self.canvas.delete("all")
             w = max(self.canvas.winfo_width(), 10)
             h = max(self.canvas.winfo_height(), 10)
-            self.canvas.create_text(w // 2, h // 2, text="XZN",
-                                    font=("Courier New", 40, "bold"), fill="#5a4590")
+            cx, cy = w // 2, h // 2
         except Exception:
-            pass
-        self._photo = None
-        self._last_gen = -1
-        self._scaled_cache = None
+            return
+
+        # Remember we're on the idle card, so the resize handler can
+        # redraw it if the user resizes the window.
+        self._showing_idle_card = True
+        self._idle_primary = primary_text
+        self._idle_secondary = secondary_text
+
+        # --- Big centred logo (if the file exists) -----------------------
+        logo_drawn = False
+        logo_size = 0
+        logo_path = resource_path(LOGO_FILENAME)
+        if os.path.isfile(logo_path):
+            try:
+                logo_size = max(120, min(320, int(min(w, h) * 0.35)))
+                logo_img = Image.open(logo_path).convert("RGBA")
+                logo_img = logo_img.resize((logo_size, logo_size),
+                                           Image.Resampling.LANCZOS)
+                # PhotoImage must be kept alive on self, otherwise Tk
+                # garbage-collects it and the canvas shows nothing.
+                self._idle_logo_photo = ImageTk.PhotoImage(logo_img)
+                self.canvas.create_image(
+                    cx, cy - 25,
+                    image=self._idle_logo_photo,
+                    anchor="center",
+                )
+                logo_drawn = True
+            except Exception as e:
+                print(f"[XZN] VideoWindow idle logo failed: {e}")
+                logo_drawn = False
+
+        # --- Fallback wordmark, only if the logo is missing --------------
+        # (The real logo already contains the "XZN" text, so we must not
+        # draw the wordmark when the logo is present.)
+        if not logo_drawn:
+            wordmark_y = cy
+            font_word = ("Helvetica", 32, "bold")
+            shadow = "#000000"
+            main = "#d9c4ff"
+            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2),
+                           (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                self.canvas.create_text(
+                    cx + dx, wordmark_y + dy,
+                    text="XZN", font=font_word,
+                    fill=shadow, anchor="center",
+                )
+            self.canvas.create_text(
+                cx, wordmark_y,
+                text="XZN", font=font_word,
+                fill=main, anchor="center",
+            )
+
+        # --- Optional secondary line (track title / status) --------------
+        # Uses the same font as the playlist (Courier New 9), placed
+        # a bit further below the logo so it has room to breathe.
+        if secondary_text:
+            try:
+                font_sec = ("Courier New", 9)
+                max_chars = max(20, int(w / 8))
+                text = secondary_text
+                if len(text) > max_chars:
+                    text = text[:max_chars - 1] + "…"
+
+                if logo_drawn and logo_size > 0:
+                    # Logo centre is cy - 15; add a generous gap below it
+                    # so the text does not sit right against the artwork.
+                    offset_y = cy - 15 + (logo_size // 2) + 60
+                else:
+                    offset_y = cy + 70
+
+                self.canvas.create_text(
+                    cx, offset_y,
+                    text=text, font=font_sec,
+                    fill="#9a94b0", anchor="center",
+                )
+            except Exception:
+                pass
 
     def update_frame(self, img, gen):
         if img is None or not self.is_alive():
@@ -1570,6 +1713,8 @@ class VideoWindow:
         self._scaled_cache = (gen, (cw, ch), photo)
         self._last_gen = gen
         self._last_canvas_size = (cw, ch)
+        # A real frame is now on the canvas — leave idle-card mode.
+        self._showing_idle_card = False
 
         try:
             self.canvas.delete("all")
@@ -3608,6 +3753,15 @@ class App:
                 self._video_win.hide()
             else:
                 self._video_win.show()
+                # Make sure we show the idle card when there's no video
+                # to draw yet (e.g. audio-only track).
+                try:
+                    if not self.player.has_video:
+                        self._video_win.show_placeholder(
+                            "", self.player.title_text or ""
+                        )
+                except Exception:
+                    pass
             self._apply_alpha_to_windows()
         except Exception as e:
             print(f"[XZN] _toggle_video_window failed: {e}")
@@ -3698,7 +3852,14 @@ class App:
             except Exception as e:
                 print(f"[XZN] fit_to_video failed: {e}")
             self._video_win.show()
-            self._video_win.show_placeholder()
+            # Show the idle card with the track title while we wait for
+            # the first real video frame (or forever, for audio-only).
+            try:
+                self._video_win.show_placeholder(
+                    "", self.player.title_text or ""
+                )
+            except Exception:
+                pass
             self._apply_alpha_to_windows()
 
     def _on_state(self, s):
