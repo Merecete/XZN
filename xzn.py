@@ -15,6 +15,7 @@ Features
 - Tag editor for audio files (via mutagen)
 - Accent color theming and alpha transparency
 - Auto-saves playlist and settings (crash-safe)
+- Ships with a built-in sample intro track (installed on first run)
 
 Platform notes
 --------------
@@ -31,6 +32,7 @@ import json
 import time
 import queue
 import random
+import shutil
 import threading
 import traceback
 from collections import deque
@@ -80,9 +82,10 @@ ANALYZER_BARS = 32
 
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
-# --- Icon constants -----------------------------------------------------
+# --- Icon / resource constants ------------------------------------------
 ICON_FILENAME = "xzn.ico"
 LOGO_FILENAME = "xzn-logo.png"
+INTRO_FILENAME = "XZN Intro.mp3"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
 
 # --- Full MIT license text (for the Info window button) ----------------
@@ -217,6 +220,73 @@ def apply_window_icon(window):
 
 
 # ------------------------------------------------------------------------
+def _get_app_data_dir():
+    """
+    Return the per-user application data directory for XZN, creating
+    it if necessary. This is the *durable* location where the sample
+    track is materialised on first run, so it survives across launches
+    (unlike the ephemeral PyInstaller _MEIPASS directory).
+    """
+    if IS_WINDOWS:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif IS_MAC:
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    app_dir = os.path.join(base, "Xenon-Zones")
+    try:
+        os.makedirs(app_dir, exist_ok=True)
+    except Exception as e:
+        print(f"[XZN] Could not create app data dir '{app_dir}': {e}")
+        return None
+    return app_dir
+
+
+def ensure_sample_track():
+    """
+    Materialise the bundled intro MP3 into a durable per-user location.
+
+    The bundled file lives in resource_path(INTRO_FILENAME). On first
+    run we copy it to the app data directory so the playlist entry
+    keeps working across restarts (PyInstaller's _MEIPASS temp dir is
+    wiped between launches).
+
+    Returns the absolute path to the durable copy, or None if the
+    source file is missing or the copy failed.
+    """
+    src = resource_path(INTRO_FILENAME)
+    if not os.path.isfile(src):
+        # Not fatal: the user may have a build without the intro.
+        print(f"[XZN] No bundled intro track found at '{src}'")
+        return None
+
+    app_dir = _get_app_data_dir()
+    if app_dir is None:
+        # Fall back to using the bundled file directly (works while
+        # the process is alive, but the path may vanish on restart).
+        return src
+
+    dst = os.path.join(app_dir, INTRO_FILENAME)
+
+    # If the destination already exists and is non-empty, keep it.
+    # (We don't overwrite so the user's file, if they edited tags
+    # or replaced it, stays intact.)
+    try:
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            return dst
+    except Exception:
+        pass
+
+    try:
+        shutil.copy2(src, dst)
+        print(f"[XZN] Sample intro installed → {dst}")
+        return dst
+    except Exception as e:
+        print(f"[XZN] Failed to copy sample intro: {e}")
+        return src
+
+
+# ------------------------------------------------------------------------
 def fmt_time(t):
     if t is None or t < 0:
         t = 0.0
@@ -332,6 +402,7 @@ def load_settings():
         "eq_gains": [0.0] * len(EQ_BANDS),
         "eq_enabled": True,
         "eq_preamp": 0.0,
+        "sample_offered": False,
     }
     try:
         if os.path.isfile(SETTINGS_PATH):
@@ -360,6 +431,9 @@ def load_settings():
             pre = data.get("eq_preamp")
             if isinstance(pre, (int, float)):
                 defaults["eq_preamp"] = float(max(-12.0, min(12.0, pre)))
+            so = data.get("sample_offered")
+            if isinstance(so, bool):
+                defaults["sample_offered"] = so
     except Exception as e:
         print(f"[XZN] Failed to load settings: {e}")
     return defaults
@@ -375,6 +449,7 @@ def save_settings(state):
             "eq_gains": list(state.get("eq_gains") or [0.0] * len(EQ_BANDS)),
             "eq_enabled": bool(state.get("eq_enabled", True)),
             "eq_preamp": float(state.get("eq_preamp") or 0.0),
+            "sample_offered": bool(state.get("sample_offered", False)),
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -2705,6 +2780,7 @@ class App:
         self._eq_gains = list(settings.get("eq_gains") or [0.0] * len(EQ_BANDS))
         self._eq_enabled = bool(settings.get("eq_enabled", True))
         self._eq_preamp = float(settings.get("eq_preamp") or 0.0)
+        self._sample_offered = bool(settings.get("sample_offered", False))
         self.palette = build_palette(self.accent)
         print(f"[XZN] Accent color: {self.accent}")
         if _MUTAGEN_AVAILABLE:
@@ -2761,6 +2837,25 @@ class App:
             self.status_left.config(
                 text=f"{len(self.playlist)} tracks loaded from last session.",
                 fg=self.palette["GRAY"])
+
+        # --- Sample intro track -----------------------------------------
+        # Offer the bundled sample intro once, on first run. The MP3 is
+        # copied to a durable per-user location so the playlist entry
+        # survives restarts (PyInstaller's _MEIPASS is wiped between
+        # launches). If the user deletes the entry, it stays gone.
+        if not self._sample_offered:
+            try:
+                intro_path = ensure_sample_track()
+                if intro_path and intro_path not in self.playlist:
+                    self.playlist.insert(0, intro_path)
+                    self.listbox.insert(0, "♪ XZN Intro (Sample)")
+                    self._update_pl_count()
+                    self._refresh_selection()
+                    print(f"[XZN] Sample intro offered: {intro_path}")
+            except Exception as e:
+                print(f"[XZN] Sample intro setup failed: {e}")
+            self._sample_offered = True
+            self._persist_settings()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<space>", lambda e: self.toggle_play())
@@ -2840,6 +2935,7 @@ class App:
             "eq_gains": list(self._eq_gains),
             "eq_enabled": bool(self._eq_enabled),
             "eq_preamp": float(self._eq_preamp),
+            "sample_offered": bool(getattr(self, "_sample_offered", False)),
         })
 
     def set_eq_enabled(self, en):
