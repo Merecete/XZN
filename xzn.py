@@ -83,7 +83,8 @@ ANALYZER_BARS = 32
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
 # --- Icon / resource constants ------------------------------------------
-ICON_FILENAME = "xzn.ico"
+ICON_FILENAME = "xzn.ico"                 # Windows icon
+LINUX_ICON_FILENAME = "xzn.png"           # Linux / macOS icon
 LOGO_FILENAME = "xzn-logo.png"
 INTRO_FILENAME = "XZN Intro.mp3"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
@@ -188,7 +189,16 @@ def resource_path(relative_name):
 
 
 def get_icon_path():
-    p = resource_path(ICON_FILENAME)
+    """
+    Return the platform-appropriate window-icon path, or None if the
+    file is missing.
+
+    - Windows uses the classic .ico (xzn.ico).
+    - Linux and macOS use a PNG (xzn.png), because Tk on those
+      platforms cannot load .ico files via iconbitmap().
+    """
+    name = ICON_FILENAME if IS_WINDOWS else LINUX_ICON_FILENAME
+    p = resource_path(name)
     return p if os.path.isfile(p) else None
 
 
@@ -204,19 +214,39 @@ def set_taskbar_app_id():
 
 
 def apply_window_icon(window):
+    """
+    Apply the window icon in a cross-platform way.
+
+    - Windows: iconbitmap() with the .ico (native, crisp at all sizes).
+    - Linux/macOS: iconphoto() with a PNG loaded via PhotoImage, because
+      Tk on those platforms does not support iconbitmap() with .ico.
+
+    The PhotoImage reference is stored on the window object so Tk does
+    not garbage-collect it (otherwise the icon silently disappears).
+    """
+    if window is None:
+        return
+
     icon_path = get_icon_path()
     if not icon_path:
         return
-    try:
-        window.iconbitmap(icon_path)
-    except Exception as e:
-        print(f"[XZN] iconbitmap failed: {e}")
+
+    # --- Windows: native .ico ------------------------------------------
+    if IS_WINDOWS:
         try:
-            img = tk.PhotoImage(file=icon_path)
-            window.tk.call("wm", "iconphoto", window._w, img)
-            window._icon_photo_ref = img
-        except Exception as e2:
-            print(f"[XZN] iconphoto fallback failed: {e2}")
+            window.iconbitmap(icon_path)
+            return
+        except Exception as e:
+            print(f"[XZN] iconbitmap failed: {e}")
+
+    # --- Linux / macOS (and Windows fallback): PNG via iconphoto -------
+    try:
+        img = tk.PhotoImage(file=icon_path)
+        window.tk.call("wm", "iconphoto", window._w, img)
+        # Keep a reference so Tk does not GC the image.
+        window._icon_photo_ref = img
+    except Exception as e:
+        print(f"[XZN] iconphoto failed: {e}")
 
 
 # ------------------------------------------------------------------------
@@ -4254,7 +4284,11 @@ def main():
     print(f"[XZN] av={av.__version__}  numpy={np.__version__}")
     print(f"[XZN] Settings: {SETTINGS_PATH}")
     icon = get_icon_path()
-    print(f"[XZN] Icon: {icon if icon else 'NOT FOUND (xzn.ico missing)'}")
+    if icon:
+        print(f"[XZN] Icon: {icon}")
+    else:
+        print(f"[XZN] Icon: NOT FOUND "
+              f"({ICON_FILENAME if IS_WINDOWS else LINUX_ICON_FILENAME} missing)")
     app = App()
     argv_files = [a for a in sys.argv[1:] if os.path.isfile(a)]
     if argv_files:
