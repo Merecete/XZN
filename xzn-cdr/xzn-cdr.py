@@ -148,7 +148,7 @@ SOFTWARE.
 
 
 # ========================================================================
-# Palette + helpers
+# Palette + helpers[cite: 5]
 # ========================================================================
 DEFAULT_PALETTE = {
     "BG":        "#14121f",
@@ -202,7 +202,21 @@ def find_ffmpeg() -> Optional[str]:
     bundled = resource_path(os.path.join("ffmpeg", exe_name))
     if os.path.isfile(bundled):
         return bundled
-    return shutil.which("ffmpeg")
+    
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+        
+    if IS_MAC:
+        macos_paths = [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg"
+        ]
+        for path in macos_paths:
+            if os.path.isfile(path):
+                return path
+
+    return None
 
 
 def find_ffprobe() -> Optional[str]:
@@ -214,7 +228,19 @@ def find_ffprobe() -> Optional[str]:
 
 
 def find_cdparanoia() -> Optional[str]:
-    return shutil.which(CDPARANOIA_BIN)
+    found = shutil.which(CDPARANOIA_BIN)
+    if found:
+        return found
+    
+    macos_paths = [
+        "/opt/homebrew/bin/cd-paranoia",
+        "/usr/local/bin/cd-paranoia"
+    ]
+    for path in macos_paths:
+        if os.path.isfile(path):
+            return path
+            
+    return None
 
 
 def find_drutil() -> Optional[str]:
@@ -441,18 +467,13 @@ def fmt_time(seconds):
 
 
 # ========================================================================
-# Cancellation helpers
+# Cancellation helpers[cite: 5]
 # ========================================================================
 class CancelledError(Exception):
     pass
 
 
 def _kill_process(proc):
-    """
-    Force-stop a subprocess, even if it is blocked reading from a CD.
-    Closing stderr first makes the caller's 'for line in proc.stderr'
-    loop end immediately instead of waiting for the next line.
-    """
     try:
         if proc.stderr is not None:
             proc.stderr.close()
@@ -484,7 +505,7 @@ def _safe_unlink(path):
 
 
 # ========================================================================
-# CD backends
+# CD backends[cite: 5]
 # ========================================================================
 @dataclass
 class RipJob:
@@ -513,11 +534,6 @@ class RipJob:
 
 def encode_args_for_ffmpeg(ffmpeg: str, fmt: str, bitrate: str,
                            wav_in: str, out: str) -> List[str]:
-    """
-    Build a ffmpeg command line for encoding a WAV file to the target format.
-    `bitrate` is a string like "128", "192", "256" or "320" (kbit/s).
-    For OGG it is mapped to the corresponding Vorbis quality value.
-    """
     args = [ffmpeg, "-y", "-i", wav_in]
     if fmt == "MP3":
         args += ["-codec:a", "libmp3lame", "-b:a", f"{bitrate}k"]
@@ -533,7 +549,6 @@ def encode_args_for_ffmpeg(ffmpeg: str, fmt: str, bitrate: str,
 
 
 class CDBackend:
-    """Abstract CD backend. Subclasses implement list_tracks + rip_track."""
     name = "abstract"
 
     def is_available(self) -> bool:
@@ -552,26 +567,12 @@ class CDBackend:
                   progress_callback=None,
                   cancel_event=None,
                   is_last_track: bool = False) -> None:
-        """
-        Rip a single track to out_path. Backend is responsible for:
-        - reading CD audio
-        - encoding to the target format (or writing WAV directly)
-        - honouring cancel_event (raise CancelledError)
-        - honouring is_last_track (avoid end-of-disc hang)
-        - honouring the requested bitrate for lossy formats
-        - using start_sec as the offset from the beginning of the disc
-          (only relevant for backends that read the whole disc as one stream)
-        """
         raise NotImplementedError
 
     def eject(self, drive: str, ui_queue: "queue.Queue") -> None:
-        """Optional: eject the disc. Default does nothing."""
         pass
 
 
-# ------------------------------------------------------------------------
-# Windows backend: ffmpeg -f libcdio
-# ------------------------------------------------------------------------
 class FFmpegBackend(CDBackend):
     name = "ffmpeg-libcdio"
 
@@ -675,9 +676,6 @@ class FFmpegBackend(CDBackend):
         else:
             codec_args = ["-c:a", "copy"]
 
-        # The `-ss 0` before `-i` forces libcdio to initialize the stream
-        # at sector 0. Without it, ffmpeg can hang mid-read on some Windows
-        # builds when only a post-input `-ss` is used.
         cmd = [
             self.ffmpeg,
             "-y",
@@ -749,9 +747,6 @@ class FFmpegBackend(CDBackend):
             ui_queue.put(("log", f"Eject skipped: {e}"))
 
 
-# ------------------------------------------------------------------------
-# Linux backend: pycdio
-# ------------------------------------------------------------------------
 class PyCdioBackend(CDBackend):
     name = "pycdio"
 
@@ -880,9 +875,6 @@ class PyCdioBackend(CDBackend):
         if not _PYCDIO_AVAILABLE:
             raise RuntimeError("pycdio is not available.")
 
-        # start_sec is not needed here: pycdio addresses tracks directly
-        # via the TOC, so we ignore the parameter.
-
         fmt = self._infer_format(out_path)
         tmpdir = os.path.dirname(out_path) or "."
         wav_path = os.path.join(tmpdir, f".xzn_tmp_{track_no:02d}.wav")
@@ -975,9 +967,6 @@ class PyCdioBackend(CDBackend):
             ui_queue.put(("log", f"Eject skipped: {e}"))
 
 
-# ------------------------------------------------------------------------
-# macOS backend: cd-paranoia
-# ------------------------------------------------------------------------
 class CdParanoiaBackend(CDBackend):
     name = "cd-paranoia"
 
@@ -1058,9 +1047,6 @@ class CdParanoiaBackend(CDBackend):
                 f"{CDPARANOIA_BIN} not found. "
                 f"Install it with: brew install {CDPARANOIA_PKG}"
             )
-
-        # start_sec is not needed here: cd-paranoia addresses tracks
-        # directly by number, so we ignore the parameter.
 
         fmt = PyCdioBackend._infer_format(out_path)
         tmpdir = os.path.dirname(out_path) or "."
@@ -1169,7 +1155,6 @@ class CdParanoiaBackend(CDBackend):
 
 
 def make_backend(ffmpeg: Optional[str], ffprobe: Optional[str]) -> CDBackend:
-    """Pick the right CD backend for the current platform."""
     if IS_WINDOWS:
         return FFmpegBackend(ffmpeg, ffprobe)
     if IS_MAC:
@@ -1177,9 +1162,6 @@ def make_backend(ffmpeg: Optional[str], ffprobe: Optional[str]) -> CDBackend:
     return PyCdioBackend()
 
 
-# ========================================================================
-# Ripper worker (platform-agnostic)
-# ========================================================================
 def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
     os.makedirs(job.outdir, exist_ok=True)
 
@@ -1245,9 +1227,6 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
         ui_queue.put(("error", str(e)))
 
 
-# ========================================================================
-# macOS flat dropdown (only used on macOS, harmless elsewhere)
-# ========================================================================
 class FlatOptionMenu:
     def __init__(self, parent, var, options, palette, width=8, on_change=None):
         self.palette = palette
@@ -1376,9 +1355,6 @@ class FlatOptionMenu:
         self._popup = None
 
 
-# ========================================================================
-# License / Info / Theme windows
-# ========================================================================
 def show_license_window(parent, palette, app=None):
     p = palette
     win = tk.Toplevel(parent)
@@ -1678,9 +1654,6 @@ class InfoWindow:
             pass
 
 
-# ========================================================================
-# Main application
-# ========================================================================
 class App:
     def __init__(self):
         set_taskbar_app_id()
@@ -1733,15 +1706,16 @@ class App:
         self.root.after(100, self._poll_ui_queue)
         self.root.after(200, self._startup_check)
 
-    # --- macOS menu ------------------------------------------------------
     def _setup_macos_menu(self):
         if not IS_MAC:
             return
         try:
             self._mac_menubar = tk.Menu(self.root)
             self.root.config(menu=self._mac_menubar)
+            
+            # Direkte Umleitung des macOS "About"-Menüpunkts auf dein Info-Fenster
             self.root.createcommand(
-                "tk::mac::standardAboutPanel", self._show_mac_about
+                "tk::mac::standardAboutPanel", self.show_info
             )
         except Exception as e:
             self._mac_menubar = None
@@ -1758,13 +1732,6 @@ class App:
         except Exception as e:
             print(f"[XZN-CDR] _attach_macos_menu failed: {e}")
 
-    def _show_mac_about(self):
-        try:
-            self.show_info()
-        except Exception as e:
-            print(f"[XZN-CDR] macOS About failed: {e}")
-
-    # --- UI helpers ------------------------------------------------------
     def _mkbtn(self, parent, text, cmd, w=4):
         p = self.palette
         bg_color = p["RAISED"]
@@ -1805,7 +1772,6 @@ class App:
         except Exception:
             pass
 
-    # --- Build UI --------------------------------------------------------
     def _build_ui(self):
         p = self.palette
         self.root.configure(bg=p["BG"])
@@ -1819,7 +1785,6 @@ class App:
         self._main_frame.pack(fill="both", expand=True)
         parent = self._main_frame
 
-        # Header
         hdr = tk.Frame(parent, bg=p["PANEL"], height=44)
         hdr.pack(fill="x", padx=8, pady=(8, 4))
         hdr.pack_propagate(False)
@@ -1839,7 +1804,6 @@ class App:
         self.alpha_scale.set(self._initial_alpha)
         self.alpha_scale.pack(side="left", padx=(4, 0))
 
-        # Hero
         hero = tk.Canvas(parent, height=70, bg=p["PANEL"], highlightthickness=0)
         hero.pack(fill="x", padx=8, pady=(0, 6))
         hero.update_idletasks()
@@ -1862,7 +1826,6 @@ class App:
                          text="Rip audio CDs to MP3 / OGG / FLAC / WAV.",
                          font=FONT_TAG, fill=p["WHITE"], anchor="nw")
 
-        # Options
         opt = tk.Frame(parent, bg=p["PANEL"])
         opt.pack(fill="x", padx=8, pady=(0, 4))
 
@@ -1935,7 +1898,6 @@ class App:
                        bd=0, highlightthickness=0
                        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=(10, 0), pady=(2, 6))
 
-        # Output directory
         od = tk.Frame(parent, bg=p["PANEL"])
         od.pack(fill="x", padx=8, pady=(0, 4))
         tk.Label(od, text="Output", font=FONT_UI_B,
@@ -1946,7 +1908,6 @@ class App:
         self.outdir_label.pack(side="left", fill="x", expand=True, ipady=3)
         self._mkbtn(od, "…", self.pick_outdir, w=3).pack(side="right", padx=(4, 0))
 
-        # Track list
         list_frame = tk.Frame(parent, bg=p["PANEL"])
         list_frame.pack(fill="both", expand=True, padx=8, pady=(4, 4))
 
@@ -1983,14 +1944,12 @@ class App:
         self._bind_mousewheel(self.track_canvas)
         self._bind_mousewheel(self.track_inner)
 
-        # Progress bar
         prog = tk.Frame(parent, bg=p["PANEL"])
         prog.pack(fill="x", padx=8, pady=(0, 4))
         self.progress = tk.Canvas(prog, height=14, bg=p["SUNKEN"], highlightthickness=0)
         self.progress.pack(fill="x")
         self.progress.bind("<Configure>", lambda e: self._draw_progress(self._progress_value))
 
-        # Action buttons
         brow = tk.Frame(parent, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 4))
         self.btn_rip = self._mkbtn(brow, "RIP ALL", self.rip_all, w=10)
@@ -2002,14 +1961,12 @@ class App:
         self.btn_open_out = self._mkbtn(brow, "OPEN FOLDER", self.open_outdir, w=12)
         self.btn_open_out.pack(side="right", padx=(4, 10))
 
-        # Status bar
         self.status = tk.Label(parent, text="Ready.",
                                font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"], anchor="w")
         self.status.pack(fill="x", side="bottom")
 
         self._render_tracks()
 
-    # --- Mousewheel ------------------------------------------------------
     def _bind_mousewheel(self, widget):
         widget.bind("<MouseWheel>", self._on_track_mousewheel)
         widget.bind("<Button-4>", self._on_track_mousewheel)
@@ -2028,7 +1985,6 @@ class App:
             pass
         return "break"
 
-    # --- Palette / alpha -------------------------------------------------
     def apply_accent(self, accent_hex):
         self.accent = accent_hex
         self.palette = build_palette(accent_hex)
@@ -2092,7 +2048,6 @@ class App:
             except Exception:
                 pass
 
-    # --- Info / Theme ----------------------------------------------------
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
         self._apply_alpha_to_windows()
@@ -2101,7 +2056,6 @@ class App:
         ThemeWindow(self.root, self)
         self._apply_alpha_to_windows()
 
-    # --- Settings --------------------------------------------------------
     def _persist_settings(self):
         state = {
             "accent": self.accent,
@@ -2114,7 +2068,6 @@ class App:
         }
         save_settings(state)
 
-    # --- Startup ---------------------------------------------------------
     def _startup_check(self):
         p = self.palette
         msgs = []
@@ -2132,7 +2085,6 @@ class App:
                 fg=p["GRAY"],
             )
 
-    # --- Drive scanning --------------------------------------------------
     def scan_drive(self):
         p = self.palette
         drive = self.drive_entry.get().strip() or self.current_drive
@@ -2173,7 +2125,6 @@ class App:
         self._render_tracks()
         self._persist_settings()
 
-    # --- Track rendering -------------------------------------------------
     def _render_tracks(self):
         p = self.palette
         if not hasattr(self, "track_inner") or self.track_inner is None:
@@ -2230,7 +2181,6 @@ class App:
         except Exception:
             pass
 
-    # --- Output ----------------------------------------------------------
     def pick_outdir(self):
         d = filedialog.askdirectory(title="Choose output folder",
                                     initialdir=self.current_outdir or os.path.expanduser("~"))
@@ -2254,7 +2204,6 @@ class App:
         except Exception as e:
             self.status.config(text=f"Open failed: {e}", fg=self.palette["ERR"])
 
-    # --- Ripping ---------------------------------------------------------
     def _ensure_ready(self, tracks):
         p = self.palette
         if self.ripping:
@@ -2293,8 +2242,6 @@ class App:
         if not self._ensure_ready(selected_tracks):
             return
 
-        # Compute track start offsets (seconds from start of disc) once,
-        # so backends like FFmpeg don't have to query the TOC per track.
         track_ids: List[int] = []
         durations: List[float] = []
         starts: List[float] = []
@@ -2330,7 +2277,7 @@ class App:
         except Exception:
             pass
 
-        backend = self.backend  # bind for the thread
+        backend = self.backend
 
         def worker():
             rip_worker(job, backend, self.ui_queue)
@@ -2339,11 +2286,6 @@ class App:
         self.worker_thread.start()
 
     def cancel_stop(self):
-        """
-        Ask the worker to stop. Already finished tracks are kept on disk.
-        The track currently being ripped is aborted and its partial file
-        removed.
-        """
         if not self.ripping:
             return
         try:
@@ -2357,7 +2299,6 @@ class App:
         except Exception as e:
             print(f"[XZN-CDR] Stop failed: {e}")
 
-    # --- Progress bar ----------------------------------------------------
     def _draw_progress(self, value):
         c = self.progress
         p = self.palette
@@ -2375,7 +2316,6 @@ class App:
             c.create_text(w // 2, h // 2, text=self._progress_label,
                           font=("Helvetica", 8), fill=p["WHITE"])
 
-    # --- UI queue polling ------------------------------------------------
     def _poll_ui_queue(self):
         try:
             while True:
@@ -2412,7 +2352,6 @@ class App:
         except Exception:
             pass
 
-    # --- Shutdown --------------------------------------------------------
     def on_close(self):
         if self.ripping:
             if not messagebox.askyesno(
