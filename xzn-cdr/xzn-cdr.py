@@ -2164,9 +2164,11 @@ class App:
             var = tk.BooleanVar(value=True)
             self.track_checks.append(var)
 
+            # Checkbox mit Kommando-Binding zur Unterstützung von Mehrfachauswahl-Synchronisation
             cb = tk.Checkbutton(row, variable=var, bg=p["SUNKEN"],
                                 activebackground=p["SUNKEN"],
-                                selectcolor=p["RAISED"], bd=0, highlightthickness=0)
+                                selectcolor=p["RAISED"], bd=0, highlightthickness=0,
+                                command=lambda i=idx: self._on_checkbox_clicked(i))
             cb.pack(side="left", padx=(4, 4))
 
             num_lbl = tk.Label(row, text=f"{track_no:02d}", font=FONT_LCD,
@@ -2213,8 +2215,6 @@ class App:
 
             # -- Right click on a row: toggle checkboxes of selection ---
             def _on_right_click(event, _idx=idx):
-                # If the clicked row is not part of the selection,
-                # select it first so the user gets the expected target.
                 if _idx not in self._track_selected:
                     self._track_selected = {_idx}
                     self._track_anchor = _idx
@@ -2225,9 +2225,6 @@ class App:
             for w in (row, num_lbl, dur_lbl, desc_lbl):
                 w.configure(cursor="hand2")
                 w.bind("<Button-1>", _on_click)
-                # Use Button-3 (right) on all platforms; on macOS Tk
-                # also delivers Button-2 and Button-3 for secondary
-                # clicks, so bind both for safety.
                 w.bind("<Button-3>", _on_right_click)
                 w.bind("<Button-2>", _on_right_click)
                 w.bind("<Control-Button-1>", _on_right_click)
@@ -2235,9 +2232,6 @@ class App:
             for w in (row, cb, num_lbl, dur_lbl, desc_lbl):
                 self._bind_mousewheel(w)
 
-        # Space toggles the checkboxes of the currently selected rows,
-        # provided the canvas has focus. This is a keyboard alternative
-        # to the right-click gesture.
         try:
             self.track_canvas.configure(takefocus=1)
             self.track_canvas.bind("<space>", self._on_space_toggle)
@@ -2263,6 +2257,20 @@ class App:
         """Keyboard shortcut: toggle checkboxes of the selected rows."""
         self._toggle_checks_for_selection()
         return "break"
+
+    def _on_checkbox_clicked(self, idx):
+        """Synchronisiert den Klick auf eine Checkbox auf alle aktuell markierten Tracks."""
+        if idx in self._track_selected and len(self._track_selected) > 1:
+            try:
+                target_state = self.track_checks[idx].get()
+                for i in self._track_selected:
+                    if i != idx:
+                        try:
+                            self.track_checks[i].set(target_state)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     def _apply_row_selection_colors(self):
         """Repaint row backgrounds based on self._track_selected."""
