@@ -74,7 +74,7 @@ except Exception:
     _MUTAGEN_AVAILABLE = False
 
 
-APP_NAME = "Xenon-Zones (XZN)"
+APP_NAME = "Xenon-Zones"
 VERSION = "1.0.1"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
