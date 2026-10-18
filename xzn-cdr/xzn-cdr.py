@@ -148,7 +148,7 @@ SOFTWARE.
 
 
 # ========================================================================
-# Palette + helpers[cite: 5]
+# Palette + helpers
 # ========================================================================
 DEFAULT_PALETTE = {
     "BG":        "#14121f",
@@ -467,7 +467,7 @@ def fmt_time(seconds):
 
 
 # ========================================================================
-# Cancellation helpers[cite: 5]
+# Cancellation helpers
 # ========================================================================
 class CancelledError(Exception):
     pass
@@ -505,7 +505,7 @@ def _safe_unlink(path):
 
 
 # ========================================================================
-# CD backends[cite: 5]
+# CD backends
 # ========================================================================
 @dataclass
 class RipJob:
@@ -1686,6 +1686,12 @@ class App:
         self.bitrate_var = tk.StringVar(value=settings.get("bitrate") or "320")
         self.eject_var = tk.BooleanVar(value=bool(settings.get("eject", True)))
         self.track_checks: List[tk.BooleanVar] = []
+
+        # Visual selection (independent of the checkboxes)
+        self._track_selected: set = set()
+        self._track_anchor: Optional[int] = None
+        self._track_rows: List[Tuple[tk.Frame, List[tk.Widget], tk.BooleanVar]] = []
+
         self._cancel_event: Optional[threading.Event] = None
 
         self._main_frame = None
@@ -1713,7 +1719,6 @@ class App:
             self._mac_menubar = tk.Menu(self.root)
             self.root.config(menu=self._mac_menubar)
             
-            # Direkte Umleitung des macOS "About"-Menüpunkts auf dein Info-Fenster
             self.root.createcommand(
                 "tk::mac::standardAboutPanel", self.show_info
             )
@@ -2133,6 +2138,9 @@ class App:
         for w in self.track_inner.winfo_children():
             w.destroy()
         self.track_checks = []
+        self._track_selected = set()
+        self._track_anchor = None
+        self._track_rows = []
 
         if not self.cd_tracks:
             tk.Label(self.track_inner,
@@ -2149,29 +2157,99 @@ class App:
                 pass
             return
 
-        for track_no, dur in self.cd_tracks:
+        for idx, (track_no, dur) in enumerate(self.cd_tracks):
             row = tk.Frame(self.track_inner, bg=p["SUNKEN"])
             row.pack(fill="x", padx=4, pady=1)
+
             var = tk.BooleanVar(value=True)
             self.track_checks.append(var)
+
             cb = tk.Checkbutton(row, variable=var, bg=p["SUNKEN"],
                                 activebackground=p["SUNKEN"],
                                 selectcolor=p["RAISED"], bd=0, highlightthickness=0)
             cb.pack(side="left", padx=(4, 4))
-            tk.Label(row, text=f"{track_no:02d}", font=FONT_LCD,
-                     bg=p["SUNKEN"], fg=p["ACCENT"], width=4, anchor="w").pack(side="left")
-            tk.Label(row, text=f"{fmt_time(dur)}", font=FONT_UI,
-                     bg=p["SUNKEN"], fg=p["WHITE"], width=8, anchor="w").pack(side="left")
-            tk.Label(row, text="Audio Track", font=FONT_UI,
-                     bg=p["SUNKEN"], fg=p["GRAY"]).pack(side="left", padx=(6, 0))
 
-            for child in (row, cb):
-                self._bind_mousewheel(child)
+            num_lbl = tk.Label(row, text=f"{track_no:02d}", font=FONT_LCD,
+                               bg=p["SUNKEN"], fg=p["ACCENT"], width=4, anchor="w")
+            num_lbl.pack(side="left")
+
+            dur_lbl = tk.Label(row, text=f"{fmt_time(dur)}", font=FONT_UI,
+                               bg=p["SUNKEN"], fg=p["WHITE"], width=8, anchor="w")
+            dur_lbl.pack(side="left")
+
+            desc_lbl = tk.Label(row, text="Audio Track", font=FONT_UI,
+                                bg=p["SUNKEN"], fg=p["GRAY"])
+            desc_lbl.pack(side="left", padx=(6, 0))
+
+            labels = [num_lbl, dur_lbl, desc_lbl, cb]
+            self._track_rows.append((row, labels, var))
+
+            # -- Left click: selection only -----------------------------
+            def _on_click(event, _idx=idx):
+                shift = bool(event.state & 0x0001)
+                ctrl  = bool(event.state & 0x0004) or bool(event.state & 0x0008)
+
+                if shift and self._track_anchor is not None:
+                    lo = min(self._track_anchor, _idx)
+                    hi = max(self._track_anchor, _idx)
+                    self._track_selected = set(range(lo, hi + 1))
+                    self._track_anchor = _idx
+                elif ctrl:
+                    if _idx in self._track_selected:
+                        self._track_selected.discard(_idx)
+                    else:
+                        self._track_selected.add(_idx)
+                    self._track_anchor = _idx
+                else:
+                    self._track_selected = {_idx}
+                    self._track_anchor = _idx
+
+                self._apply_row_selection_colors()
+                try:
+                    self.track_canvas.focus_set()
+                except Exception:
+                    pass
+                return "break"
+
+            # -- Right click on a row: toggle checkboxes of selection ---
+            def _on_right_click(event, _idx=idx):
+                # If the clicked row is not part of the selection,
+                # select it first so the user gets the expected target.
+                if _idx not in self._track_selected:
+                    self._track_selected = {_idx}
+                    self._track_anchor = _idx
+                    self._apply_row_selection_colors()
+                self._toggle_checks_for_selection()
+                return "break"
+
+            for w in (row, num_lbl, dur_lbl, desc_lbl):
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", _on_click)
+                # Use Button-3 (right) on all platforms; on macOS Tk
+                # also delivers Button-2 and Button-3 for secondary
+                # clicks, so bind both for safety.
+                w.bind("<Button-3>", _on_right_click)
+                w.bind("<Button-2>", _on_right_click)
+                w.bind("<Control-Button-1>", _on_right_click)
+
+            for w in (row, cb, num_lbl, dur_lbl, desc_lbl):
+                self._bind_mousewheel(w)
+
+        # Space toggles the checkboxes of the currently selected rows,
+        # provided the canvas has focus. This is a keyboard alternative
+        # to the right-click gesture.
+        try:
+            self.track_canvas.configure(takefocus=1)
+            self.track_canvas.bind("<space>", self._on_space_toggle)
+        except Exception:
+            pass
 
         try:
             self.track_count.config(text=f"{len(self.cd_tracks)} track(s)")
         except Exception:
             pass
+
+        self._apply_row_selection_colors()
 
         try:
             self.track_canvas.update_idletasks()
@@ -2180,6 +2258,57 @@ class App:
             self.track_scale.set(0)
         except Exception:
             pass
+
+    def _on_space_toggle(self, event=None):
+        """Keyboard shortcut: toggle checkboxes of the selected rows."""
+        self._toggle_checks_for_selection()
+        return "break"
+
+    def _apply_row_selection_colors(self):
+        """Repaint row backgrounds based on self._track_selected."""
+        p = self.palette
+        row_bg     = p["SUNKEN"]
+        row_bg_sel = mix(p["PANEL"], p["ACCENT"], 0.45)
+
+        for i, (row, labels, _var) in enumerate(self._track_rows):
+            bg = row_bg_sel if i in self._track_selected else row_bg
+            try:
+                row.configure(bg=bg)
+                for w in labels:
+                    if isinstance(w, tk.Checkbutton):
+                        w.configure(bg=bg, activebackground=bg)
+                    else:
+                        w.configure(bg=bg)
+            except Exception:
+                pass
+
+    def _toggle_checks_for_selection(self):
+        """
+        Toggle the checkboxes of every currently-selected row.
+
+        If ALL selected rows are checked, uncheck them all. Otherwise
+        (any unchecked, or a mixed state), check them all.
+        """
+        sel = sorted(self._track_selected)
+        if not sel:
+            return
+
+        all_checked = True
+        for i in sel:
+            try:
+                if not self.track_checks[i].get():
+                    all_checked = False
+                    break
+            except Exception:
+                all_checked = False
+                break
+
+        target = not all_checked
+        for i in sel:
+            try:
+                self.track_checks[i].set(target)
+            except Exception:
+                pass
 
     def pick_outdir(self):
         d = filedialog.askdirectory(title="Choose output folder",
