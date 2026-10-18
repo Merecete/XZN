@@ -74,7 +74,7 @@ except Exception:
     _MUTAGEN_AVAILABLE = False
 
 
-APP_NAME = "Xenon-Zones"
+APP_NAME = "Xenon-Zones (XZN)"
 VERSION = "1.0.1"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
@@ -3437,7 +3437,10 @@ class App:
         lrow.pack(fill="both", expand=True, pady=(2, 4))
         list_bg = darken(p["BG"], 0.65) if luminance(p["BG"]) < 0.5 else "#ffffff"
         select_bg = mix(p["PANEL"], p["ACCENT"], 0.35)
-        self.listbox = tk.Listbox(lrow, height=8, selectmode="single", bd=0,
+
+        # selectmode="extended" enables Shift-click range selection and
+        # Ctrl/Cmd-click toggle for multi-selection in the playlist.
+        self.listbox = tk.Listbox(lrow, height=8, selectmode="extended", bd=0,
                                   highlightthickness=0, exportselection=False,
                                   bg=list_bg, fg=p["WHITE"], font=("Courier New", 9),
                                   selectbackground=select_bg, selectforeground=p["WHITE"],
@@ -3497,12 +3500,20 @@ class App:
         if not (0 <= index < len(self.playlist)):
             return
 
-        # Select the clicked entry so the menu "feels" connected
+        # Preserve an existing multi-selection if the user right-clicked
+        # on an already-selected row (file-manager behaviour). Only
+        # collapse the selection when clicking on an unselected row.
         try:
-            self.listbox.selection_clear(0, "end")
-            self.listbox.selection_set(index)
+            current_sel = set(self.listbox.curselection())
         except Exception:
-            pass
+            current_sel = set()
+
+        if index not in current_sel:
+            try:
+                self.listbox.selection_clear(0, "end")
+                self.listbox.selection_set(index)
+            except Exception:
+                pass
 
         path = self.playlist[index]
         can_edit = is_taggable_audio(path) and _MUTAGEN_AVAILABLE
@@ -3629,24 +3640,72 @@ class App:
 
     # --- Playlist reorder -----------------------------------------------
     def move_up(self):
-        sel = self.listbox.curselection()
-        if not sel:
-            return
-        i = sel[0]
-        if i <= 0:
-            return
-        self._swap_items(i, i - 1)
+        self._move_block(-1)
 
     def move_down(self):
-        sel = self.listbox.curselection()
+        self._move_block(+1)
+
+    def _move_block(self, direction):
+        """
+        Move every selected playlist row as a contiguous block by one
+        position. `direction` is -1 for up and +1 for down.
+
+        Multi-row selection is supported (shift-range and ctrl/cmd-click
+        toggle both work, thanks to selectmode="extended"). The block
+        can only move if it isn't already touching the corresponding
+        edge of the playlist.
+        """
+        try:
+            sel = sorted(self.listbox.curselection())
+        except Exception:
+            return
         if not sel:
             return
-        i = sel[0]
-        if i >= len(self.playlist) - 1:
+
+        n = len(self.playlist)
+        if n <= 1:
             return
-        self._swap_items(i, i + 1)
+
+        if direction < 0:
+            # Moving up: iterate top→bottom so we don't clobber ourselves.
+            if sel[0] == 0:
+                return
+            for i in sel:
+                j = i - 1
+                self.playlist[i], self.playlist[j] = \
+                    self.playlist[j], self.playlist[i]
+        else:
+            # Moving down: iterate bottom→top.
+            if sel[-1] == n - 1:
+                return
+            for i in reversed(sel):
+                j = i + 1
+                self.playlist[i], self.playlist[j] = \
+                    self.playlist[j], self.playlist[i]
+
+        # Keep current_index pointing at the same file
+        if self.current_index in sel:
+            self.current_index += direction
+
+        # Rebuild the listbox, restoring the (shifted) selection.
+        self.listbox.delete(0, "end")
+        for p in self.playlist:
+            self.listbox.insert("end", os.path.basename(p))
+
+        new_sel = [i + direction for i in sel]
+        self.listbox.selection_clear(0, "end")
+        for i in new_sel:
+            self.listbox.selection_set(i)
+        # Keep the leading/trailing edge of the block in view.
+        try:
+            self.listbox.see(new_sel[0] if direction < 0 else new_sel[-1])
+        except Exception:
+            pass
+
+        self._persist_settings()
 
     def _swap_items(self, i, j):
+        """(Kept for potential external callers; move_up/down use _move_block.)"""
         if not (0 <= i < len(self.playlist) and 0 <= j < len(self.playlist)):
             return
         if i == j:
@@ -3914,6 +3973,10 @@ class App:
         sel = self.listbox.curselection()
         if not sel:
             return
+
+        # Did we remove the file that's currently playing?
+        playing_removed = self.current_index in sel
+
         for i in sorted(sel, reverse=True):
             del self.playlist[i]
             self.listbox.delete(i)
@@ -3921,6 +3984,16 @@ class App:
                 self.current_index -= 1
             elif i == self.current_index:
                 self.current_index = -1
+
+        # If the playing track was among the removed rows, stop playback
+        # so the player isn't left in a weird "playing but not in the
+        # playlist" state.
+        if playing_removed:
+            try:
+                self.player.stop()
+            except Exception:
+                pass
+
         self._update_pl_count()
         self._persist_settings()
 
