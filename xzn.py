@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.0
+Xenon-Zones (XZN) v1.0.1
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -75,7 +75,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
