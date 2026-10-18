@@ -2285,6 +2285,62 @@ class FlatOptionMenu:
 
 
 # ------------------------------------------------------------------------
+def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5):
+    """
+    Attach mouse-wheel control to a vertical tk.Scale.
+
+    The wheel-up direction always means "increase the value" (i.e. more
+    dB / louder), regardless of the scale's from_/to order. This matches
+    the expected behaviour after the scale was set to from_=12, to=-12
+    (so that the value at the top is +12 dB).
+
+    Important: tk.Scale.set() does NOT fire the widget's `command`
+    callback, so we call it manually. Without this, the value would
+    change visually but neither the player nor the persistence layer
+    would ever hear about it.
+    """
+    def _round_half(v):
+        # Snap to the nearest 0.5 dB step to avoid float drift.
+        return round(v * 2.0) / 2.0
+
+    def _on_wheel(event):
+        # Linux uses Button-4/5, Windows/macOS use event.delta
+        if getattr(event, "num", None) == 4:
+            delta = +1
+        elif getattr(event, "num", None) == 5:
+            delta = -1
+        else:
+            delta = +1 if getattr(event, "delta", 0) > 0 else -1
+
+        try:
+            current = float(scale.get())
+        except Exception:
+            return "break"
+
+        new_val = _round_half(current + delta * step)
+        new_val = max(lo, min(hi, new_val))
+
+        if new_val == current:
+            return "break"
+
+        try:
+            scale.set(new_val)
+        except Exception:
+            return "break"
+
+        try:
+            callback(new_val)
+        except Exception as e:
+            print(f"[XZN] wheel callback failed: {e}")
+
+        return "break"
+
+    scale.bind("<MouseWheel>", _on_wheel)   # Windows / macOS
+    scale.bind("<Button-4>", _on_wheel)     # Linux scroll up
+    scale.bind("<Button-5>", _on_wheel)     # Linux scroll down
+
+
+# ------------------------------------------------------------------------
 class EqualizerWindow:
     def __init__(self, master, app):
         self.app = app
@@ -2328,15 +2384,24 @@ class EqualizerWindow:
         pre_box.pack(side="left", padx=(0, 8))
         tk.Label(pre_box, text="PRE", font=("Courier New", 8, "bold"),
                  bg=p["PANEL"], fg=p["CYAN"]).pack()
-        self.pre_scale = tk.Scale(pre_box, from_=-12, to=12, orient="vertical",
+
+        # NOTE: from_=12, to=-12 so that +12 dB is at the top and
+        # -12 dB is at the bottom. Vertical tk.Scale puts from_ at
+        # the top and to at the bottom; with from_ < to it would be
+        # inverted (bug: pulling the slider down made it LOUDER).
+        self.pre_scale = tk.Scale(pre_box, from_=12, to=-12, orient="vertical",
                                   length=200, resolution=0.5, showvalue=True,
                                   bg=p["PANEL"], fg=p["ACCENT"],
                                   troughcolor=p["SUNKEN"],
                                   highlightthickness=0, sliderrelief="flat",
                                   font=("Courier New", 7),
+                                  takefocus=0,
                                   command=self._on_preamp)
         self.pre_scale.set(getattr(app, "_eq_preamp", 0.0))
         self.pre_scale.pack()
+
+        # Mouse-wheel control for the preamp
+        _bind_scale_wheel(self.pre_scale, self._on_preamp, -12.0, 12.0, 0.5)
 
         self.band_scales = []
         for i, (freq, label) in enumerate(zip(EQ_BANDS, EQ_BAND_LABELS)):
@@ -2344,16 +2409,26 @@ class EqualizerWindow:
             col.pack(side="left", padx=1)
             tk.Label(col, text=label, font=("Courier New", 8, "bold"),
                      bg=p["PANEL"], fg=p["CYAN"]).pack()
-            sc = tk.Scale(col, from_=-12, to=12, orient="vertical",
+
+            # Same from_/to flip as the preamp: +12 at top, -12 at bottom.
+            sc = tk.Scale(col, from_=12, to=-12, orient="vertical",
                           length=180, resolution=0.5, showvalue=False,
                           bg=p["PANEL"], fg=p["ACCENT"],
                           troughcolor=p["SUNKEN"],
                           highlightthickness=0, sliderrelief="flat",
                           width=14,
+                          takefocus=0,
                           command=lambda v, idx=i: self._on_band(idx, v))
             sc.set(getattr(app, "_eq_gains", [0.0]*len(EQ_BANDS))[i])
             sc.pack()
             self.band_scales.append(sc)
+
+            # Mouse-wheel control for each band
+            _bind_scale_wheel(
+                sc,
+                (lambda v, idx=i: self._on_band(idx, v)),
+                -12.0, 12.0, 0.5,
+            )
 
         preset_row = tk.Frame(self.win, bg=p["PANEL"])
         preset_row.pack(fill="x", padx=10, pady=(0, 6))
