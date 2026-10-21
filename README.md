@@ -27,8 +27,8 @@ A classic media player with a cyberpunk look, video, audio,
 ## Installation
 
 ```bash
-git clone https://github.com/Merecete/Xenon-Zones.git
-cd Xenon-Zones
+git clone https://github.com/Merecete/XZN.git
+cd XZN
 
 
 ## Windows:
