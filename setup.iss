@@ -1,17 +1,8 @@
 ; ==================================================================
-;  XZN (Xenon-Zones) — Inno Setup script
-; ==================================================================
-;  Erzeugt XZN_Setup_v1.0.2.exe aus dem PyInstaller-Build.
-;  Benötigt Inno Setup 6.x  →  https://jrsoftware.org/isdl
-;
-;  Ablauf:
-;    1.  pyinstaller xzn.spec        →  XZN\XZN.exe (oder dist\XZN\XZN.exe)
-;    2.  setup.iss in Inno Setup öffnen
-;    3.  F9 (Compile)                →  installer\XZN_Setup_v1.0.2.exe
+;  XZN — Inno Setup script (Branding: XZN)
 ; ==================================================================
 
-#define MyAppShortName  "XZN"
-#define MyAppLongName   "Xenon-Zones"
+#define MyAppName       "XZN"
 #define MyAppVersion    "1.0.2"
 #define MyAppPublisher  "Merecete"
 #define MyAppURL        "https://example.com/xzn"
@@ -19,30 +10,29 @@
 #define MyAppRegKey     "Merecete"
 
 [Setup]
-; AppId bleibt über Releases hinweg gleich.
 AppId={{8F1A2B3C-4D5E-6F70-8192-A3B4C5D6E7F8}
-AppName={#MyAppShortName}
+AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppShortName} {#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 AppCopyright=© 2026 {#MyAppPublisher}
 
-DefaultDirName={autopf}\{#MyAppRegKey}\{#MyAppShortName}
-DefaultGroupName={#MyAppShortName}
+DefaultDirName={autopf}\{#MyAppRegKey}\{#MyAppName}
+DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableWelcomePage=no
 
 LicenseFile=LICENSE.txt
 
 OutputDir=installer
-OutputBaseFilename={#MyAppShortName}_Setup_v{#MyAppVersion}
+OutputBaseFilename={#MyAppName}_Setup_v{#MyAppVersion}
 
 SetupIconFile=xzn.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
-UninstallDisplayName={#MyAppShortName} {#MyAppVersion}
+UninstallDisplayName={#MyAppName} {#MyAppVersion}
 
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -67,44 +57,40 @@ Source: "dist\*"; DestDir: "{app}"; \
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppShortName}"; \
+Name: "{group}\{#MyAppName}"; \
     Filename: "{app}\{#MyAppExeName}"; \
     IconFilename: "{app}\{#MyAppExeName}"
-Name: "{group}\{cm:UninstallProgram,{#MyAppShortName}}"; \
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; \
     Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppShortName}"; \
+Name: "{autodesktop}\{#MyAppName}"; \
     Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; \
-    Description: "{cm:LaunchProgram,{#MyAppShortName}}"; \
+    Description: "{cm:LaunchProgram,{#MyAppName}}"; \
     Flags: nowait postinstall skipifsilent
 
 [Registry]
-; ==================================================================
-;  Multimedia-Capability-Registrierung
-; ==================================================================
-
 ; --- 1. Capability-Beschreibung -----------------------------------
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}"; \
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}"; \
     Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability"; \
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability"; \
     Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability"; \
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability"; \
     ValueType: string; ValueName: "ApplicationName"; \
-    ValueData: "{#MyAppShortName}"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability"; \
+    ValueData: "{#MyAppName}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability"; \
     ValueType: string; ValueName: "ApplicationDescription"; \
-    ValueData: "A lightweight media player in classic Winamp style ({#MyAppLongName})."; \
+    ValueData: "A lightweight media player in classic Winamp style."; \
     Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability"; \
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability"; \
     ValueType: string; ValueName: "ApplicationIcon"; \
     ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletevalue
 
 ; --- 2. Capability bei Windows anmelden ---------------------------
 Root: HKLM; Subkey: "Software\RegisteredApplications"; \
-    ValueType: string; ValueName: "{#MyAppShortName}"; \
-    ValueData: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability"; \
+    ValueType: string; ValueName: "{#MyAppName}"; \
+    ValueData: "Software\{#MyAppRegKey}\{#MyAppName}\Capability"; \
     Flags: uninsdeletevalue
 
 ; --- 3. Multimedia-ProgID -----------------------------------------
@@ -117,33 +103,33 @@ Root: HKLM; Subkey: "Software\Classes\XZN.Media\DefaultIcon"; \
     ValueData: "{app}\{#MyAppExeName},0"
 Root: HKLM; Subkey: "Software\Classes\XZN.Media\shell\open"; \
     ValueType: string; ValueName: "FriendlyAppName"; \
-    ValueData: "{#MyAppShortName}"
+    ValueData: "{#MyAppName}"
 Root: HKLM; Subkey: "Software\Classes\XZN.Media\shell\open\command"; \
     ValueType: string; ValueName: ""; \
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 ; --- 4. FileAssociations (Audio) ----------------------------------
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mp3";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".ogg";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".oga";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".opus"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".flac"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".wav";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4a";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4b";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".aac";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".aiff"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".ape";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".wma";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mp3";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".ogg";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".oga";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".opus"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".flac"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".wav";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4a";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4b";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".aac";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".aiff"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".ape";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".wma";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
 
 ; --- 5. FileAssociations (Video) ----------------------------------
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mp4";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mkv";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".avi";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mov";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".webm"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".flv";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppShortName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4v";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mp4";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mkv";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".avi";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".mov";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".webm"; ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".flv";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppRegKey}\{#MyAppName}\Capability\FileAssociations"; ValueType: string; ValueName: ".m4v";  ValueData: "XZN.Media"; Flags: uninsdeletevalue
 
 ; --- 6. "Öffnen mit"-Hinweise (OpenWithProgids) -------------------
 Root: HKLM; Subkey: "Software\Classes\.mp3\OpenWithProgids";  ValueType: string; ValueName: "XZN.Media"; ValueData: ""; Flags: uninsdeletevalue
