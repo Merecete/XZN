@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.0.1
+XZN-CDR v1.0.2
 ==============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -73,7 +73,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
@@ -381,6 +381,62 @@ def make_flat_button(parent, text, cmd, palette, width=None,
         if width is not None:
             kw["width"] = width
         return tk.Button(parent, **kw)
+
+
+def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5, round_to=0.5):
+    """
+    Attach mouse-wheel control to a tk.Scale.
+
+    round_to controls snapping precision:
+        - 0.5 for dB sliders (EQ bands, preamp)  → half-dB steps
+        - 1.0 for integer sliders (volume, balance, alpha) → whole steps
+        - 0   disables snapping entirely
+
+    Important: tk.Scale.set() does NOT fire the widget's `command`
+    callback, so we call it manually. Without this, the value would
+    change visually but neither the app nor the persistence layer
+    would ever hear about it.
+    """
+    def _round_val(v):
+        if round_to <= 0:
+            return v
+        return round(v / round_to) * round_to
+
+    def _on_wheel(event):
+        # Linux uses Button-4/5, Windows/macOS use event.delta
+        if getattr(event, "num", None) == 4:
+            delta = +1
+        elif getattr(event, "num", None) == 5:
+            delta = -1
+        else:
+            delta = +1 if getattr(event, "delta", 0) > 0 else -1
+
+        try:
+            current = float(scale.get())
+        except Exception:
+            return "break"
+
+        new_val = _round_val(current + delta * step)
+        new_val = max(lo, min(hi, new_val))
+
+        if new_val == current:
+            return "break"
+
+        try:
+            scale.set(new_val)
+        except Exception:
+            return "break"
+
+        try:
+            callback(new_val)
+        except Exception as e:
+            print(f"[XZN-CDR] wheel callback failed: {e}")
+
+        return "break"
+
+    scale.bind("<MouseWheel>", _on_wheel)   # Windows / macOS
+    scale.bind("<Button-4>", _on_wheel)     # Linux scroll up
+    scale.bind("<Button-5>", _on_wheel)     # Linux scroll down
 
 
 def _detect_windows_cd_drives() -> List[str]:
@@ -1808,6 +1864,9 @@ class App:
                                     highlightthickness=0, sliderrelief="flat")
         self.alpha_scale.set(self._initial_alpha)
         self.alpha_scale.pack(side="left", padx=(4, 0))
+        # --- Mouse-wheel control for the window Alpha slider (5% steps) ---
+        _bind_scale_wheel(self.alpha_scale, self._on_alpha_cmd,
+                          lo=70, hi=100, step=5, round_to=1.0)
 
         hero = tk.Canvas(parent, height=70, bg=p["PANEL"], highlightthickness=0)
         hero.pack(fill="x", padx=8, pady=(0, 6))
@@ -2164,7 +2223,6 @@ class App:
             var = tk.BooleanVar(value=True)
             self.track_checks.append(var)
 
-            # Checkbox mit Kommando-Binding zur Unterstützung von Mehrfachauswahl-Synchronisation
             cb = tk.Checkbutton(row, variable=var, bg=p["SUNKEN"],
                                 activebackground=p["SUNKEN"],
                                 selectcolor=p["RAISED"], bd=0, highlightthickness=0,
@@ -2186,7 +2244,6 @@ class App:
             labels = [num_lbl, dur_lbl, desc_lbl, cb]
             self._track_rows.append((row, labels, var))
 
-            # -- Left click: selection only -----------------------------
             def _on_click(event, _idx=idx):
                 shift = bool(event.state & 0x0001)
                 ctrl  = bool(event.state & 0x0004) or bool(event.state & 0x0008)
@@ -2213,7 +2270,6 @@ class App:
                     pass
                 return "break"
 
-            # -- Right click on a row: toggle checkboxes of selection ---
             def _on_right_click(event, _idx=idx):
                 if _idx not in self._track_selected:
                     self._track_selected = {_idx}
