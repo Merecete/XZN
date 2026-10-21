@@ -93,6 +93,14 @@ LOGO_FILENAME = "xzn-logo.png"
 INTRO_FILENAME = "XZN Intro.mp3"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
 
+# --- Playlist row separator ---------------------------------------------
+# Thin vertical line drawn between the title and the duration. U+2502
+# (Box Drawings Light Vertical) is a clean, serif-free line in Courier
+# New on all three target platforms. If a system lacks proper Unicode
+# box-drawing coverage, swap this for "|" (ASCII pipe) — visually very
+# similar in monospace fonts.
+PL_SEPARATOR = "│"
+
 # --- Full MIT license text (for the Info window button) ----------------
 MIT_LICENSE_TEXT = """MIT License
 
@@ -3276,39 +3284,56 @@ class App:
             w = self.listbox.winfo_width()
             if w <= 1:
                 return 60
-            cw = self._pl_font.measure("0")
+            # Measure using the listbox's actual font, not a separately
+            # constructed one. This avoids subtle DPI / measurement
+            # discrepancies that can happen when the two don't resolve
+            # to the exact same font instance.
+            try:
+                actual = tkfont.Font(font=self.listbox.cget("font"))
+                cw = actual.measure("0")
+            except Exception:
+                cw = self._pl_font.measure("0")
             if cw <= 0:
                 return 60
-            # Subtract a couple of characters for scrollbar overlap/safety.
+            # Subtract a couple of characters for the scrollbar overlap
+            # and a bit of right-edge breathing room.
             return max(30, (w // cw) - 2)
         except Exception:
             return 60
 
     def _format_pl_line(self, path):
         """
-        Format a playlist entry as "name<pad>  dur" with the duration
-        right-aligned against the actual right edge of the listbox.
-        Uses the custom display name when one is registered (e.g. the
-        intro track), otherwise the file's basename.
+        Format a playlist entry as
+            "name<pad>│<dur>"
+        with the duration right-aligned against the actual right edge
+        of the listbox, and a thin vertical separator between the two
+        columns. Uses the custom display name when one is registered
+        (e.g. the intro track), otherwise the file's basename.
         """
         name = self._display_names.get(path) or os.path.basename(path)
         dur = self._track_durations.get(path)
         dur_str = fmt_time(dur) if dur and dur > 0 else "--:--"
-        # Reserve exactly 7 characters for the duration (e.g. "1:23:45"
-        # or "  05:07") so all durations line up vertically.
+        # Right-align the duration to 7 characters so "05:07" and
+        # "1:23:45" both line up perfectly.
         dur_str = f"{dur_str:>7}"
-        
+
+        sep = PL_SEPARATOR
+
         total_chars = self._get_max_pl_chars()
-        max_name_len = total_chars - 9  # 7 for dur_str + 2 spaces
-        
+        # Reserve: 1 (space) + 1 (separator) + 7 (duration) = 9 chars
+        # for the right-hand block. The remaining space is for the
+        # name plus its padding.
+        right_reserve = 9
+        max_name_len = total_chars - right_reserve
         if max_name_len < 10:
             max_name_len = 10
-            
+
         if len(name) > max_name_len:
             name = name[:max_name_len - 1] + "…"
-            
-        pad = " " * max(0, total_chars - len(name) - len(dur_str))
-        return f"{name}{pad}{dur_str}"
+
+        right_part = f" {sep}{dur_str}"
+        pad = " " * max(0, total_chars - len(name) - len(right_part))
+        return f"{name}{pad}{right_part}"
 
     def _on_listbox_resize(self, event=None):
         """
@@ -3879,7 +3904,7 @@ class App:
         self.listbox.bind("<MouseWheel>", self._on_list_mousewheel)
         self.listbox.bind("<Button-4>", self._on_list_mousewheel)
         self.listbox.bind("<Button-5>", self._on_list_mousewheel)
-        
+
         # Rebuild strings dynamically to keep durations right-aligned.
         self.listbox.bind("<Configure>", self._on_listbox_resize)
 
