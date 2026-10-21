@@ -35,8 +35,8 @@ Mac: `cd-paranoia` | `brew install libcdio-paranoia ffmpeg`
 
 ```bash
 
-git clone https://github.com/Merecete/Xenon-Zones.git
-cd Xenon-Zones/xzn-cdr
+git clone https://github.com/Merecete/XZN.git
+cd XZN/xzn-cdr
 
 
 ## Windows:
