@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.1
+Xenon-Zones (XZN) v1.0.2
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -14,6 +14,7 @@ Features
 - Video window with idle card (logo shown when no video frame)
 - Tag editor for audio files (via mutagen)
 - Accent color theming and alpha transparency
+- Animated GIF / WebP backgrounds in the hero canvas
 - Auto-saves playlist and settings (crash-safe)
 - Ships with a built-in sample intro track (installed on first run)
 
@@ -39,7 +40,7 @@ from collections import deque
 import numpy as np
 import av
 import sounddevice as sd
-from PIL import Image, ImageTk, ImageDraw, ImageFilter
+from PIL import Image, ImageTk, ImageDraw, ImageFilter, ImageSequence
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -75,7 +76,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -526,23 +527,58 @@ def _make_gradient_bg(w, h, palette):
     return img.convert("RGB")
 
 
-def load_background(w, h, palette, custom_path=None):
+def _prepare_rgb_frame(pil_frame, palette):
     """
-    Load a background image, checking several locations:
+    Convert any PIL image (static or animation frame) to flat RGB.
 
-    1. A user-supplied custom path (set via the BG button).
-    2. Bundled resources via resource_path() — works both from source
-       and from a PyInstaller build.
-    3. Files next to the script/executable in the current working dir.
+    GIF / PNG transparency is composited over the PANEL color, so
+    transparent regions blend seamlessly into the hero canvas.
+    """
+    if pil_frame.mode == "RGB":
+        return pil_frame
+    if pil_frame.mode in ("RGBA", "LA", "P"):
+        rgba = pil_frame.convert("RGBA")
+        bg = Image.new("RGB", rgba.size, hex_to_rgb(palette["PANEL"]))
+        bg.paste(rgba, (0, 0), rgba)
+        return bg
+    return pil_frame.convert("RGB")
 
-    If none of these exist, fall back to the generated gradient.
+
+def _process_bg_frame(img_rgb, w, h, palette):
+    """
+    Resize (cover), center-crop, and apply the hero fade to a single
+    background frame. Returns a PIL.Image sized exactly (w, h).
+    """
+    iw, ih = img_rgb.size
+    if iw <= 0 or ih <= 0:
+        return Image.new("RGB", (w, h), hex_to_rgb(palette["PANEL"]))
+    scale = max(w / iw, h / ih)
+    nw = max(2, int(iw * scale))
+    nh = max(2, int(ih * scale))
+    img = img_rgb.resize((nw, nh), Image.Resampling.LANCZOS)
+    left = (nw - w) // 2
+    top_ = (nh - h) // 2
+    img = img.crop((left, top_, left + w, top_ + h))
+    return _apply_hero_fade(img, palette)
+
+
+def load_background_frames(w, h, palette, custom_path=None):
+    """
+    Load a background image (static PNG/JPG/BMP or animated GIF/WebP)
+    and return (frames, durations, is_animated).
+
+    - frames      : list of PIL.Image (RGB, sized to w×h, fade applied)
+    - durations   : list of per-frame durations in ms (only for animated)
+    - is_animated : True if this file has more than one frame
     """
     candidates = []
 
     if custom_path:
         candidates.append(custom_path)
 
-    for name in ("bg.png", "bg.jpg", "bg.jpeg", "background.png", "background.jpg"):
+    for name in ("bg.png", "bg.jpg", "bg.jpeg", "bg.gif", "bg.webp",
+                 "background.png", "background.jpg", "background.gif",
+                 "background.webp"):
         # Bundled / source location (via sys._MEIPASS when frozen)
         candidates.append(resource_path(name))
         # Working directory, so users can drop a bg next to the exe
@@ -557,20 +593,60 @@ def load_background(w, h, palette, custom_path=None):
         seen.add(p)
         if os.path.isfile(p):
             try:
-                img = Image.open(p).convert("RGB")
-                iw, ih = img.size
-                scale = max(w / iw, h / ih)
-                nw, nh = int(iw * scale), int(ih * scale)
-                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-                left = (nw - w) // 2
-                top_ = (nh - h) // 2
-                img = img.crop((left, top_, left + w, top_ + h))
-                print(f"[XZN] Loaded background: {p}")
-                return img
+                return _load_bg_file(p, w, h, palette)
             except Exception as e:
                 print(f"[XZN] Failed to load BG ({p}): {e}")
 
-    return _make_gradient_bg(w, h, palette)
+    return ([_make_gradient_bg(w, h, palette)], [0], False)
+
+
+def _load_bg_file(path, w, h, palette):
+    """Load one background file; returns (frames, durations, animated)."""
+    ext = os.path.splitext(path)[1].lower()
+
+    # Animated formats: extract all frames via ImageSequence so that
+    # GIF disposal methods are handled correctly by PIL.
+    if ext in (".gif", ".webp"):
+        try:
+            im = Image.open(path)
+            n_frames = getattr(im, "n_frames", 1)
+            if n_frames > 1:
+                frames = []
+                durations = []
+                for frame in ImageSequence.Iterator(im):
+                    # Read the per-frame duration BEFORE moving on.
+                    try:
+                        dur = frame.info.get("duration", 100)
+                        if not isinstance(dur, (int, float)) or dur <= 0:
+                            dur = 100
+                    except Exception:
+                        dur = 100
+
+                    rgb = _prepare_rgb_frame(frame, palette)
+                    frames.append(_process_bg_frame(rgb, w, h, palette))
+                    durations.append(int(dur))
+
+                print(f"[XZN] Loaded animated BG: {path} "
+                      f"({n_frames} frame(s))")
+                return (frames, durations, True)
+        except Exception as e:
+            print(f"[XZN] Animated BG load failed ({path}): {e}")
+            # Fall through to static handling
+
+    # Static
+    img = Image.open(path)
+    rgb = _prepare_rgb_frame(img, palette)
+    processed = _process_bg_frame(rgb, w, h, palette)
+    print(f"[XZN] Loaded background: {path}")
+    return ([processed], [0], False)
+
+
+def load_background(w, h, palette, custom_path=None):
+    """Backward-compatible helper: returns the first frame only."""
+    frames, _durations, _animated = load_background_frames(
+        w, h, palette, custom_path
+    )
+    return frames[0]
 
 
 def _apply_hero_fade(img, palette):
@@ -2285,7 +2361,7 @@ class FlatOptionMenu:
 
 
 # ------------------------------------------------------------------------
-def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5):
+def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5, round_to=0.5):
     """
     Attach mouse-wheel control to a vertical tk.Scale.
 
@@ -2294,14 +2370,20 @@ def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5):
     the expected behaviour after the scale was set to from_=12, to=-12
     (so that the value at the top is +12 dB).
 
+    round_to controls snapping precision:
+        - 0.5 for dB sliders (EQ bands, preamp)  → half-dB steps
+        - 1.0 for integer sliders (volume, balance, alpha) → whole steps
+        - 0   disables snapping entirely
+
     Important: tk.Scale.set() does NOT fire the widget's `command`
     callback, so we call it manually. Without this, the value would
     change visually but neither the player nor the persistence layer
     would ever hear about it.
     """
-    def _round_half(v):
-        # Snap to the nearest 0.5 dB step to avoid float drift.
-        return round(v * 2.0) / 2.0
+    def _round_val(v):
+        if round_to <= 0:
+            return v
+        return round(v / round_to) * round_to
 
     def _on_wheel(event):
         # Linux uses Button-4/5, Windows/macOS use event.delta
@@ -2317,7 +2399,7 @@ def _bind_scale_wheel(scale, callback, lo=-12.0, hi=12.0, step=0.5):
         except Exception:
             return "break"
 
-        new_val = _round_half(current + delta * step)
+        new_val = _round_val(current + delta * step)
         new_val = max(lo, min(hi, new_val))
 
         if new_val == current:
@@ -2749,7 +2831,7 @@ class BgPopup:
 
         has_bg = bool(app._bg_path and os.path.isfile(app._bg_path))
 
-        self.item1 = tk.Label(inner, text="Choose image…",
+        self.item1 = tk.Label(inner, text="Choose image / GIF…",
                               font=FONT_UI, bg=p["RAISED"], fg=p["WHITE"],
                               anchor="w", padx=14, pady=6, cursor="hand2")
         self.item1.pack(fill="x")
@@ -2907,6 +2989,10 @@ class App:
         self.repeat_mode = 0
         self._marquee_offset = 0
         self._seek_dragging = False
+        # While a wheel-seek burst is in progress, _tick_mid must not
+        # overwrite the seek slider with the real playback position.
+        self._seek_wheel_active = False
+        self._seek_wheel_timer = None
         self._auto_gain = 1.0
         self._bg_photo = None
         self._hero_size = (0, 0)
@@ -2921,6 +3007,14 @@ class App:
         # Registry for toplevels that should follow the main window's alpha
         # (used for nested windows like the License window)
         self._extra_alpha_windows = []
+
+        # --- Animated background state ---------------------------------
+        # These are populated by _render_bg() when the background file
+        # is an animated GIF or WebP.
+        self._bg_anim_job = None
+        self._bg_frames_photo = None       # list of ImageTk.PhotoImage
+        self._bg_frame_durations = None    # list of ints (ms per frame)
+        self._bg_frame_index = 0
 
         self._build_ui()
         self._video_win = VideoWindow(self.root, self)
@@ -3355,6 +3449,9 @@ class App:
                                     highlightthickness=0, sliderrelief="flat")
         self.alpha_scale.set(getattr(self, "_initial_alpha", 100))
         self.alpha_scale.pack(side="left", padx=(4, 0))
+        # --- Mouse-wheel control for the window Alpha slider (5% steps) ---
+        _bind_scale_wheel(self.alpha_scale, self._on_alpha_cmd,
+                          lo=70, hi=100, step=5, round_to=1.0)
 
         self.hero = tk.Canvas(self._main_frame, height=200, bg=p["PANEL"], highlightthickness=0)
         self.hero.pack(fill="both", expand=False, padx=8, pady=(0, 6))
@@ -3400,6 +3497,10 @@ class App:
         self.seek.pack(fill="x", padx=8, pady=(2, 2))
         self.seek.bind("<Button-1>", lambda e: setattr(self, "_seek_dragging", True))
         self.seek.bind("<ButtonRelease-1>", self._on_seek_release)
+        # Mouse-wheel scrolling on the timeline (5 s per notch)
+        self.seek.bind("<MouseWheel>", self._on_seek_wheel)
+        self.seek.bind("<Button-4>", self._on_seek_wheel)
+        self.seek.bind("<Button-5>", self._on_seek_wheel)
 
         vrow = tk.Frame(self._main_frame, bg=p["PANEL"])
         vrow.pack(fill="x", padx=8, pady=(0, 4))
@@ -3410,6 +3511,10 @@ class App:
                                   sliderrelief="flat")
         self.vol_scale.set(85)
         self.vol_scale.pack(side="left", padx=(4, 10))
+        # Mouse-wheel control for Volume (5% steps)
+        _bind_scale_wheel(self.vol_scale, self._on_vol_cmd,
+                          lo=0, hi=100, step=5, round_to=1.0)
+
         tk.Label(vrow, text="BAL", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
         self.bal_scale = tk.Scale(vrow, from_=0, to=100, orient="horizontal", length=130,
                                   showvalue=False, command=self._on_bal_cmd, bg=p["PANEL"],
@@ -3417,6 +3522,10 @@ class App:
                                   sliderrelief="flat")
         self.bal_scale.set(50)
         self.bal_scale.pack(side="left", padx=(4, 10))
+        # Mouse-wheel control for Balance (5-unit steps)
+        _bind_scale_wheel(self.bal_scale, self._on_bal_cmd,
+                          lo=0, hi=100, step=5, round_to=1.0)
+
         self.btn_eq = self._mkbtn(vrow, "EQ", self.show_equalizer, w=4)
         self.btn_eq.pack(side="right", padx=(0, 4))
         self.btn_mute = self._mkbtn(vrow, "MUTE", self.toggle_mute, w=6)
@@ -3747,19 +3856,111 @@ class App:
         self._hero_resize_job = self.root.after(60, self._render_bg)
 
     def _render_bg(self):
+        """
+        Render the hero background.
+
+        For static images: display once, no animation.
+        For animated GIF/WebP: pre-convert every frame to a PhotoImage
+        and cycle through them with root.after().
+        """
         self._hero_resize_job = None
+
+        # Always stop the previous animation before starting fresh.
+        self._stop_bg_animation()
+
         try:
             w = max(self.hero.winfo_width(), 40)
             h = max(self.hero.winfo_height(), 40)
-            img = load_background(w, h, self.palette, self._bg_path)
-            img = _apply_hero_fade(img, self.palette)
-            self._bg_photo = ImageTk.PhotoImage(img)
-            self.hero.delete("bg")
-            self.hero.create_image(0, 0, image=self._bg_photo, anchor="nw", tags="bg")
-            self.hero.tag_lower("bg")
-            self._draw_hero_overlay()
+            frames, durations, is_animated = load_background_frames(
+                w, h, self.palette, self._bg_path
+            )
+
+            if is_animated and len(frames) > 1:
+                # --- Animated path ------------------------------------
+                self._bg_frames_photo = [
+                    ImageTk.PhotoImage(f) for f in frames
+                ]
+                self._bg_frame_durations = durations
+                self._bg_frame_index = 0
+                self._bg_photo = self._bg_frames_photo[0]
+
+                self.hero.delete("bg")
+                self.hero.create_image(
+                    0, 0, image=self._bg_photo, anchor="nw", tags="bg"
+                )
+                self.hero.tag_lower("bg")
+                self._draw_hero_overlay()
+                self._schedule_next_bg_frame()
+            else:
+                # --- Static path --------------------------------------
+                img = frames[0]
+                self._bg_photo = ImageTk.PhotoImage(img)
+                self.hero.delete("bg")
+                self.hero.create_image(
+                    0, 0, image=self._bg_photo, anchor="nw", tags="bg"
+                )
+                self.hero.tag_lower("bg")
+                self._draw_hero_overlay()
         except Exception as e:
             print(f"[XZN] _render_bg failed: {e}")
+
+    def _schedule_next_bg_frame(self):
+        """Arm the timer for the next background animation frame."""
+        if not self._bg_frames_photo or not self._bg_frame_durations:
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            delay = self._bg_frame_durations[self._bg_frame_index]
+            if delay <= 0:
+                delay = 100
+            # Clamp to a sane range so a broken GIF can't freeze/hog.
+            delay = max(20, min(1000, int(delay)))
+        except Exception:
+            delay = 100
+        try:
+            self._bg_anim_job = self.root.after(delay, self._bg_anim_tick)
+        except Exception:
+            self._bg_anim_job = None
+
+    def _bg_anim_tick(self):
+        """Show the next frame of the animated background."""
+        self._bg_anim_job = None
+        if not self._bg_frames_photo:
+            return
+        try:
+            self._bg_frame_index = (
+                self._bg_frame_index + 1
+            ) % len(self._bg_frames_photo)
+            self._bg_photo = self._bg_frames_photo[self._bg_frame_index]
+            try:
+                self.hero.itemconfigure("bg", image=self._bg_photo)
+            except Exception:
+                # Fallback: recreate the image item entirely.
+                self.hero.delete("bg")
+                self.hero.create_image(
+                    0, 0, image=self._bg_photo, anchor="nw", tags="bg"
+                )
+                self.hero.tag_lower("bg")
+        except Exception as e:
+            print(f"[XZN] BG anim tick failed: {e}")
+        finally:
+            self._schedule_next_bg_frame()
+
+    def _stop_bg_animation(self):
+        """Cancel the animation timer and drop PhotoImage references."""
+        if self._bg_anim_job is not None:
+            try:
+                self.root.after_cancel(self._bg_anim_job)
+            except Exception:
+                pass
+            self._bg_anim_job = None
+        self._bg_frames_photo = None
+        self._bg_frame_durations = None
+        self._bg_frame_index = 0
 
     def _draw_hero_overlay(self):
         c = self.hero
@@ -3817,6 +4018,7 @@ class App:
                 pass
 
     def remove_bg(self):
+        self._stop_bg_animation()
         had_bg = bool(self._bg_path)
         self._bg_path = None
         self._bg_photo = None
@@ -3831,13 +4033,19 @@ class App:
 
     def choose_bg(self):
         p = filedialog.askopenfilename(
-            title="Choose background image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All files", "*.*")])
+            title="Choose background image (static or animated GIF)",
+            filetypes=[
+                ("Images / animations",
+                 "*.png *.jpg *.jpeg *.bmp *.gif *.webp"),
+                ("All files", "*.*"),
+            ])
         if p:
             self._bg_path = p
             self._render_bg()
             self._persist_settings()
-            self.status_left.config(text=f"Background: {os.path.basename(p)}", fg=self.palette["GRAY"])
+            self.status_left.config(
+                text=f"Background: {os.path.basename(p)}",
+                fg=self.palette["GRAY"])
 
     def _on_alpha_cmd(self, v):
         self._apply_alpha_to_windows()
@@ -4129,8 +4337,10 @@ class App:
             p.seek(p.position() + dt)
 
     def nudge_volume(self, dv):
-        v = int(self.vol_scale.get()) + dv
-        self.vol_scale.set(max(0, min(100, v)))
+        # Clamp before calling set_volume so the player never receives
+        # an out-of-range float (matches the value the slider shows).
+        v = max(0, min(100, int(self.vol_scale.get()) + dv))
+        self.vol_scale.set(v)
         self.player.set_volume(v / 100.0)
 
     def toggle_mute(self):
@@ -4185,7 +4395,9 @@ class App:
             print(f"[XZN] _toggle_video_fullscreen failed: {e}")
 
     def _on_seek_cmd(self, v):
-        if self._seek_dragging:
+        # Also show the scrubbed time while a mouse-wheel seek burst is
+        # in progress (not just during a drag).
+        if self._seek_dragging or self._seek_wheel_active:
             dur = self.player.duration or 0.0
             self.cur_lbl.config(text=fmt_time(dur * float(v) / 1000.0))
 
@@ -4194,6 +4406,65 @@ class App:
         p = self.player
         if p.state in ("playing", "paused") and p.duration > 0:
             p.seek(p.duration * float(self.seek.get()) / 1000.0)
+
+    # --- Mouse-wheel seek on the timeline --------------------------------
+    def _on_seek_wheel(self, event):
+        """
+        Mouse-wheel scrolling on the seek slider jumps 5 seconds per
+        notch. A short timer (`_seek_wheel_timer`) keeps
+        `_seek_wheel_active` true during rapid bursts, so `_tick_mid`
+        doesn't immediately overwrite the slider with the real playback
+        position between wheel events.
+        """
+        p = self.player
+        if p.state not in ("playing", "paused") or p.duration <= 0:
+            return "break"
+
+        # Linux uses Button-4/5, Windows/macOS use event.delta
+        if getattr(event, "num", None) == 4:
+            delta = +1
+        elif getattr(event, "num", None) == 5:
+            delta = -1
+        else:
+            delta = +1 if getattr(event, "delta", 0) > 0 else -1
+
+        # The seek Scale runs 0..1000 (permille of duration).
+        # Convert our 5-second step into permille for the current track.
+        step_permille = 5000.0 / p.duration
+
+        try:
+            current = float(self.seek.get())
+        except Exception:
+            return "break"
+
+        new_val = max(0.0, min(1000.0, current + delta * step_permille))
+        if new_val == current:
+            return "break"
+
+        self._seek_wheel_active = True
+        try:
+            # Scale.set() fires _on_seek_cmd (updates the time label).
+            self.seek.set(new_val)
+        except Exception:
+            self._seek_wheel_active = False
+            return "break"
+
+        p.seek(p.duration * new_val / 1000.0)
+
+        # Debounce: keep _seek_wheel_active true for a short moment so
+        # rapid wheel events accumulate without _tick_mid fighting back.
+        if self._seek_wheel_timer is not None:
+            try:
+                self.root.after_cancel(self._seek_wheel_timer)
+            except Exception:
+                pass
+        self._seek_wheel_timer = self.root.after(250, self._reset_seek_wheel_state)
+
+        return "break"
+
+    def _reset_seek_wheel_state(self):
+        self._seek_wheel_active = False
+        self._seek_wheel_timer = None
 
     def _on_vol_cmd(self, v):
         self.player.set_volume(float(v) / 100.0)
@@ -4311,7 +4582,9 @@ class App:
             p = self.player
             pos = p.position()
             dur = p.duration or 0.0
-            if not self._seek_dragging:
+            # Don't fight the slider while the user is dragging it or
+            # while a mouse-wheel seek burst is still active.
+            if not self._seek_dragging and not self._seek_wheel_active:
                 self.cur_lbl.config(text=fmt_time(pos))
                 self.seek.set(int(1000 * (pos / dur)) if dur > 0 else 0)
             self._poll_events()
@@ -4388,6 +4661,12 @@ class App:
 
     # --- Shutdown --------------------------------------------------------
     def on_close(self):
+        # Stop the background animation first — its after() callbacks
+        # must not fire against a destroyed root.
+        try:
+            self._stop_bg_animation()
+        except Exception:
+            pass
         try:
             self._close_bg_popup()
         except Exception:
