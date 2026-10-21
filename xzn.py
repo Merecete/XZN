@@ -1627,12 +1627,116 @@ class VideoWindow:
         self._idle_primary = ""
         self._idle_secondary = ""
 
+        # --- Positioning state ------------------------------------------
+        # These track whether the window has ever been placed next to
+        # the main window, and what its last known (x, y) was. The
+        # position is preserved across hide/show cycles and across
+        # fit_to_video() resizes, so switching between videos no
+        # longer resets the window's location.
+        self._has_been_positioned = False
+        self._last_xy = None
+
         self.canvas.bind("<Double-Button-1>", self.toggle_fullscreen)
         self.win.bind("<Escape>", lambda e: self.exit_fullscreen())
 
         # Redraw the idle card when the window is resized and no video
         # frame is currently shown. Otherwise the card stays tiny.
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    # --- Position helpers ----------------------------------------------
+    def _get_xy(self):
+        """
+        Return the window's current top-left (x, y), but only if the
+        window is actually mapped ("normal"). Withdrawn windows report
+        odd/offscreen coordinates on some platforms, so we ignore those.
+        """
+        try:
+            if self.win.state() != "normal":
+                return None
+            x = self.win.winfo_x()
+            y = self.win.winfo_y()
+            if x < -10000 or y < -10000:
+                return None
+            return (x, y)
+        except Exception:
+            return None
+
+    def _position_next_to_main(self):
+        """
+        Place the window next to the main window on first show.
+
+        Preferred order:
+            1. Right of the main window, top edge aligned.
+            2. Left of the main window.
+            3. Below the main window.
+            4. Centered on the primary screen (fallback).
+
+        Only runs once — after that, the user's manual position wins.
+        """
+        if self._has_been_positioned:
+            return
+
+        try:
+            mx = self.master.winfo_rootx()
+            my = self.master.winfo_rooty()
+            mw = self.master.winfo_width()
+            mh = self.master.winfo_height()
+        except Exception:
+            mx = my = mw = mh = 0
+
+        try:
+            sw = self.win.winfo_screenwidth()
+            sh = self.win.winfo_screenheight()
+        except Exception:
+            sw, sh = 1920, 1080
+
+        # Use current size if available, otherwise sensible defaults.
+        try:
+            vw = max(self.win.winfo_width(), 320)
+            vh = max(self.win.winfo_height(), 200)
+        except Exception:
+            vw, vh = 960, 540
+
+        gap = 16
+
+        # 1) Right of the main window, top aligned.
+        x = mx + mw + gap
+        y = my
+
+        # 2) Not enough room on the right? Try left.
+        if x + vw > sw:
+            x = mx - vw - gap
+            if x < 0:
+                # 3) Try below the main window.
+                x = max(0, mx)
+                y = my + mh + gap
+                if y + vh > sh:
+                    # 4) Fallback: center on the primary screen.
+                    x = max(0, (sw - vw) // 2)
+                    y = max(0, (sh - vh) // 2)
+
+        # Keep at least the title bar reachable on screen.
+        x = max(0, min(x, sw - 200))
+        y = max(0, min(y, sh - 100))
+
+        self._last_xy = (x, y)
+        self._has_been_positioned = True
+        print(f"[XZN] Video window positioned next to main: +{x}+{y}")
+
+    def _restore_xy(self, xy):
+        """Re-apply a saved (x, y), clamped to the current screen size."""
+        if xy is None:
+            return
+        try:
+            if not self.is_alive():
+                return
+            sw = self.win.winfo_screenwidth()
+            sh = self.win.winfo_screenheight()
+            x = max(0, min(xy[0], sw - 200))
+            y = max(0, min(xy[1], sh - 100))
+            self.win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
 
     def is_alive(self):
         try:
@@ -1673,8 +1777,23 @@ class VideoWindow:
                 self.win.attributes("-alpha", 1.0)
             except Exception:
                 pass
+
+            # First show ever? Place next to the main window.
+            self._position_next_to_main()
+
             self.win.deiconify()
             self.win.lift()
+
+            # Restore the remembered position after deiconify, in case
+            # the window manager reset it. Use after_idle so the WM has
+            # already finished its own placement pass.
+            if self._last_xy is not None:
+                try:
+                    self.win.after_idle(
+                        lambda xy=self._last_xy: self._restore_xy(xy)
+                    )
+                except Exception:
+                    self._restore_xy(self._last_xy)
 
             # If the canvas is empty (no frame shown yet), draw the idle
             # card so the user never sees a plain black rectangle.
@@ -1693,6 +1812,12 @@ class VideoWindow:
             print(f"[XZN] VideoWindow.show failed: {e}")
 
     def hide(self):
+        # Remember the position before withdrawing, so we can restore
+        # it on the next show().
+        if self._has_been_positioned:
+            xy = self._get_xy()
+            if xy is not None:
+                self._last_xy = xy
         try:
             if self.is_alive():
                 self.win.withdraw()
@@ -1703,6 +1828,13 @@ class VideoWindow:
         self._scaled_cache = None
 
     def fit_to_video(self, native_w, native_h):
+        """
+        Resize the window for a video with the given native resolution.
+
+        Crucially, the current (or remembered) window position is
+        preserved, so switching between videos with different aspect
+        ratios no longer causes the window to jump.
+        """
         if native_w <= 0 or native_h <= 0:
             return
         try:
@@ -1715,7 +1847,19 @@ class VideoWindow:
         scale = min(max_w / native_w, max_h / native_h, 1.0)
         w = max(320, int(native_w * scale))
         h = max(200, int(native_h * scale))
-        geom = f"{w}x{h}"
+
+        # Preserve position. Prefer the live position (window mapped),
+        # fall back to the remembered one (window hidden).
+        xy = self._get_xy()
+        if xy is None:
+            xy = self._last_xy
+
+        if xy is not None:
+            geom = f"{w}x{h}+{xy[0]}+{xy[1]}"
+        else:
+            # First ever call, before show() positions the window.
+            geom = f"{w}x{h}"
+
         try:
             self.win.geometry(geom)
         except Exception:
