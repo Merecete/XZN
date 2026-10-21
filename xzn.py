@@ -44,6 +44,7 @@ import av
 import sounddevice as sd
 from PIL import Image, ImageTk, ImageDraw, ImageFilter, ImageSequence
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
 
 # --- Windows: taskbar icon ----------------------------------------------
@@ -3091,10 +3092,6 @@ class BgPopup:
 
 # ------------------------------------------------------------------------
 class App:
-    # Width of the title column in the playlist rows. Durations are
-    # right-aligned to a fixed column so they line up vertically.
-    PL_TITLE_COLS = 46
-
     def __init__(self):
         set_taskbar_app_id()
 
@@ -3117,6 +3114,11 @@ class App:
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
         self.root.minsize(640, 700)
         self.root.geometry("760x780")
+
+        # Font used by the playlist for measuring dynamic column widths.
+        # Created once so we don't recreate it on every resize.
+        self._pl_font = tkfont.Font(family="Courier New", size=9, weight="normal")
+        self._pl_resize_job = None
 
         settings = load_settings()
         self.accent = settings["accent"]
@@ -3264,23 +3266,77 @@ class App:
         self.root.after(80, self._initial_bg)
 
     # --- Playlist row formatting ----------------------------------------
+    def _get_max_pl_chars(self):
+        """
+        Determine how many characters of the playlist font fit into
+        the current listbox width. Used to right-align the duration
+        column against the actual right edge of the widget.
+        """
+        try:
+            w = self.listbox.winfo_width()
+            if w <= 1:
+                return 60
+            cw = self._pl_font.measure("0")
+            if cw <= 0:
+                return 60
+            # Subtract a couple of characters for scrollbar overlap/safety.
+            return max(30, (w // cw) - 2)
+        except Exception:
+            return 60
+
     def _format_pl_line(self, path):
         """
         Format a playlist entry as "name<pad>  dur" with the duration
-        right-aligned in a fixed column. Uses the custom display name
-        when one is registered (e.g. the intro track), otherwise the
-        file's basename.
+        right-aligned against the actual right edge of the listbox.
+        Uses the custom display name when one is registered (e.g. the
+        intro track), otherwise the file's basename.
         """
         name = self._display_names.get(path) or os.path.basename(path)
         dur = self._track_durations.get(path)
         dur_str = fmt_time(dur) if dur and dur > 0 else "--:--"
-        # Right-align so tracks longer than an hour still line up
-        # (fmt_time yields 5 or 7 chars).
+        # Reserve exactly 7 characters for the duration (e.g. "1:23:45"
+        # or "  05:07") so all durations line up vertically.
         dur_str = f"{dur_str:>7}"
-        if len(name) > self.PL_TITLE_COLS:
-            name = name[:self.PL_TITLE_COLS - 1] + "…"
-        pad = " " * max(0, self.PL_TITLE_COLS - len(name))
-        return f"{name}{pad}  {dur_str}"
+        
+        total_chars = self._get_max_pl_chars()
+        max_name_len = total_chars - 9  # 7 for dur_str + 2 spaces
+        
+        if max_name_len < 10:
+            max_name_len = 10
+            
+        if len(name) > max_name_len:
+            name = name[:max_name_len - 1] + "…"
+            
+        pad = " " * max(0, total_chars - len(name) - len(dur_str))
+        return f"{name}{pad}{dur_str}"
+
+    def _on_listbox_resize(self, event=None):
+        """
+        Debounced handler for listbox resizes. Rebuilds the playlist
+        strings so the duration padding matches the new width.
+        """
+        if self._pl_resize_job is not None:
+            try:
+                self.root.after_cancel(self._pl_resize_job)
+            except Exception:
+                pass
+        self._pl_resize_job = self.root.after(150, self._refresh_all_pl_lines)
+
+    def _refresh_all_pl_lines(self):
+        """
+        Redraw every playlist entry (e.g. after a window resize) while
+        preserving the current selection.
+        """
+        self._pl_resize_job = None
+        try:
+            sel = self.listbox.curselection()
+            self.listbox.delete(0, "end")
+            for p in self.playlist:
+                self.listbox.insert("end", self._format_pl_line(p))
+            for i in sel:
+                self.listbox.selection_set(i)
+        except Exception as e:
+            print(f"[XZN] Playlist refresh failed: {e}")
 
     def _refresh_line_for(self, path):
         """Update a single listbox line (e.g. after a duration probe)."""
@@ -3823,6 +3879,9 @@ class App:
         self.listbox.bind("<MouseWheel>", self._on_list_mousewheel)
         self.listbox.bind("<Button-4>", self._on_list_mousewheel)
         self.listbox.bind("<Button-5>", self._on_list_mousewheel)
+        
+        # Rebuild strings dynamically to keep durations right-aligned.
+        self.listbox.bind("<Configure>", self._on_listbox_resize)
 
         pbtns = tk.Frame(plf, bg=p["PANEL"])
         pbtns.pack(fill="x")
