@@ -1,7 +1,6 @@
 # Xenon-Zones (XZN)
 
-A classic media player with a cyberpunk look, video, audio,
-10-band EQ, playlists and more. Built in Python.
+Xenon-Zones (XZN) is a fast, lightweight, and natively compiled media player for Windows, Linux, and macOS. Built with a focus on low resource consumption and a clean user experience, it is ideal for laptops, VMs, and minimal setups. XZN stands out with its modern, customizable interface and unique animated background support, offering a simple yet highly adaptable media playback experience
 
 ## Screenshots
 
