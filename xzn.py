@@ -15,6 +15,8 @@ Features
 - Tag editor for audio files (via mutagen)
 - Accent color theming and alpha transparency
 - Animated GIF / WebP backgrounds in the hero canvas
+  (playback is tied to the player: the animation runs only while
+  a track is actually playing and freezes on pause/stop)
 - Auto-saves playlist and settings (crash-safe)
 - Ships with a built-in sample intro track (installed on first run)
 
@@ -434,6 +436,7 @@ def load_settings():
         "eq_enabled": True,
         "eq_preamp": 0.0,
         "sample_offered": False,
+        "track_durations": {},
     }
     try:
         if os.path.isfile(SETTINGS_PATH):
@@ -465,6 +468,13 @@ def load_settings():
             so = data.get("sample_offered")
             if isinstance(so, bool):
                 defaults["sample_offered"] = so
+            td = data.get("track_durations")
+            if isinstance(td, dict):
+                cleaned = {}
+                for k, v in td.items():
+                    if isinstance(k, str) and isinstance(v, (int, float)) and v > 0:
+                        cleaned[k] = float(v)
+                defaults["track_durations"] = cleaned
     except Exception as e:
         print(f"[XZN] Failed to load settings: {e}")
     return defaults
@@ -481,6 +491,7 @@ def save_settings(state):
             "eq_enabled": bool(state.get("eq_enabled", True)),
             "eq_preamp": float(state.get("eq_preamp") or 0.0),
             "sample_offered": bool(state.get("sample_offered", False)),
+            "track_durations": dict(state.get("track_durations") or {}),
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -3080,6 +3091,10 @@ class BgPopup:
 
 # ------------------------------------------------------------------------
 class App:
+    # Width of the title column in the playlist rows. Durations are
+    # right-aligned to a fixed column so they line up vertically.
+    PL_TITLE_COLS = 46
+
     def __init__(self):
         set_taskbar_app_id()
 
@@ -3113,6 +3128,13 @@ class App:
         self._eq_preamp = float(settings.get("eq_preamp") or 0.0)
         self._sample_offered = bool(settings.get("sample_offered", False))
         self.palette = build_palette(self.accent)
+
+        # Runtime cache of track durations (path → seconds). Persisted
+        # in the settings file so each file is only probed once.
+        self._track_durations = dict(settings.get("track_durations") or {})
+        # Custom display names for playlist rows (e.g. "♪ XZN Intro").
+        self._display_names = {}
+
         print(f"[XZN] Accent color: {self.accent}")
         if _MUTAGEN_AVAILABLE:
             print("[XZN] Tag editing enabled (mutagen)")
@@ -3159,6 +3181,11 @@ class App:
         self._bg_frames_photo = None       # list of ImageTk.PhotoImage
         self._bg_frame_durations = None    # list of ints (ms per frame)
         self._bg_frame_index = 0
+        # When True, the animation timer is not scheduled and the GIF
+        # stays frozen on its current frame. Toggled by the player's
+        # state events so the animation only runs while a track is
+        # actually playing.
+        self._bg_anim_paused = True
 
         self._build_ui()
         self._video_win = VideoWindow(self.root, self)
@@ -3175,11 +3202,24 @@ class App:
             for p in self._saved_playlist:
                 if os.path.isfile(p) and p not in self.playlist:
                     self.playlist.append(p)
-                    self.listbox.insert("end", os.path.basename(p))
+                    self.listbox.insert("end", self._format_pl_line(p))
             self._update_pl_count()
             self.status_left.config(
                 text=f"{len(self.playlist)} tracks loaded from last session.",
                 fg=self.palette["GRAY"])
+            # Fill in any missing durations in the background (e.g.
+            # after the settings cache has been pruned or cleared).
+            self._probe_durations_async(self.playlist)
+
+        # Re-apply the friendly display name for the bundled intro,
+        # if it's still in the playlist. This restores the "♪ XZN
+        # Intro (Sample)" label without needing to persist custom names.
+        app_dir = _get_app_data_dir()
+        if app_dir:
+            intro_path = os.path.join(app_dir, INTRO_FILENAME)
+            if intro_path in self.playlist:
+                self._display_names[intro_path] = "♪ XZN Intro (Sample)"
+                self._refresh_line_for(intro_path)
 
         # --- Sample intro track -----------------------------------------
         # Offer the bundled sample intro once, on first run. The MP3 is
@@ -3190,10 +3230,12 @@ class App:
             try:
                 intro_path = ensure_sample_track()
                 if intro_path and intro_path not in self.playlist:
+                    self._display_names[intro_path] = "♪ XZN Intro (Sample)"
                     self.playlist.insert(0, intro_path)
-                    self.listbox.insert(0, "♪ XZN Intro (Sample)")
+                    self.listbox.insert(0, self._format_pl_line(intro_path))
                     self._update_pl_count()
                     self._refresh_selection()
+                    self._probe_durations_async([intro_path])
                     print(f"[XZN] Sample intro offered: {intro_path}")
             except Exception as e:
                 print(f"[XZN] Sample intro setup failed: {e}")
@@ -3220,6 +3262,77 @@ class App:
             self.root.bind(k, lambda e: self.show_equalizer())
 
         self.root.after(80, self._initial_bg)
+
+    # --- Playlist row formatting ----------------------------------------
+    def _format_pl_line(self, path):
+        """
+        Format a playlist entry as "name<pad>  dur" with the duration
+        right-aligned in a fixed column. Uses the custom display name
+        when one is registered (e.g. the intro track), otherwise the
+        file's basename.
+        """
+        name = self._display_names.get(path) or os.path.basename(path)
+        dur = self._track_durations.get(path)
+        dur_str = fmt_time(dur) if dur and dur > 0 else "--:--"
+        # Right-align so tracks longer than an hour still line up
+        # (fmt_time yields 5 or 7 chars).
+        dur_str = f"{dur_str:>7}"
+        if len(name) > self.PL_TITLE_COLS:
+            name = name[:self.PL_TITLE_COLS - 1] + "…"
+        pad = " " * max(0, self.PL_TITLE_COLS - len(name))
+        return f"{name}{pad}  {dur_str}"
+
+    def _refresh_line_for(self, path):
+        """Update a single listbox line (e.g. after a duration probe)."""
+        try:
+            idx = self.playlist.index(path)
+        except ValueError:
+            return
+        try:
+            was_selected = idx in self.listbox.curselection()
+            self.listbox.delete(idx)
+            self.listbox.insert(idx, self._format_pl_line(path))
+            if was_selected:
+                self.listbox.selection_set(idx)
+        except Exception:
+            pass
+
+    def _probe_durations_async(self, paths):
+        """
+        Probe durations for any new paths in the background and fill
+        in the durations in the playlist as they become available.
+
+        Runs in a worker thread. UI updates go through `after(0, …)`
+        because tkinter is not thread-safe.
+        """
+        pending = [p for p in paths if p not in self._track_durations]
+        if not pending:
+            return
+
+        def worker():
+            new_any = False
+            for p in pending:
+                try:
+                    with av.open(p) as cont:
+                        dur = float(cont.duration) / 1_000_000 if cont.duration else 0.0
+                        if dur > 0:
+                            self._track_durations[p] = dur
+                            new_any = True
+                            try:
+                                self.root.after(0, self._refresh_line_for, p)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(f"[XZN] Duration probe failed for {p}: {e}")
+            if new_any:
+                # Persist the new durations so subsequent launches
+                # don't have to re-probe. Runs on the main thread.
+                try:
+                    self.root.after(0, self._persist_settings)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # --- macOS menu ------------------------------------------------------
     def _setup_macos_menu(self):
@@ -3279,6 +3392,7 @@ class App:
             "eq_enabled": bool(self._eq_enabled),
             "eq_preamp": float(self._eq_preamp),
             "sample_offered": bool(getattr(self, "_sample_offered", False)),
+            "track_durations": dict(getattr(self, "_track_durations", {}) or {}),
         })
 
     def set_eq_enabled(self, en):
@@ -3490,7 +3604,7 @@ class App:
         self._bg_path = state_keep["bg_path"]
 
         for p in self.playlist:
-            self.listbox.insert("end", os.path.basename(p))
+            self.listbox.insert("end", self._format_pl_line(p))
         self._update_pl_count()
         self._refresh_selection()
 
@@ -3876,9 +3990,10 @@ class App:
         except Exception:
             pass
 
+        self._display_names[path] = new_name
         try:
             self.listbox.delete(idx)
-            self.listbox.insert(idx, new_name)
+            self.listbox.insert(idx, self._format_pl_line(path))
             self.listbox.selection_set(idx)
         except Exception:
             pass
@@ -3943,7 +4058,7 @@ class App:
         # Rebuild the listbox, restoring the (shifted) selection.
         self.listbox.delete(0, "end")
         for p in self.playlist:
-            self.listbox.insert("end", os.path.basename(p))
+            self.listbox.insert("end", self._format_pl_line(p))
 
         new_sel = [i + direction for i in sel]
         self.listbox.selection_clear(0, "end")
@@ -3968,7 +4083,7 @@ class App:
 
         self.listbox.delete(0, "end")
         for p in self.playlist:
-            self.listbox.insert("end", os.path.basename(p))
+            self.listbox.insert("end", self._format_pl_line(p))
 
         self.listbox.selection_clear(0, "end")
         self.listbox.selection_set(j)
@@ -4005,7 +4120,10 @@ class App:
 
         For static images: display once, no animation.
         For animated GIF/WebP: pre-convert every frame to a PhotoImage
-        and cycle through them with root.after().
+        and cycle through them with root.after(). The animation only
+        runs while a track is actually playing; when the render happens
+        while paused/stopped, the frames are loaded and the first frame
+        is shown, but no timer is scheduled.
         """
         self._hero_resize_job = None
 
@@ -4034,7 +4152,19 @@ class App:
                 )
                 self.hero.tag_lower("bg")
                 self._draw_hero_overlay()
-                self._schedule_next_bg_frame()
+
+                # Sync the paused flag with the player's current state
+                # so that resizing or changing the background while a
+                # track is playing keeps the animation running, and
+                # while paused/stopped keeps it frozen.
+                try:
+                    is_playing = (self.player.state == "playing")
+                except Exception:
+                    is_playing = False
+                self._bg_anim_paused = not is_playing
+
+                if not self._bg_anim_paused:
+                    self._schedule_next_bg_frame()
             else:
                 # --- Static path --------------------------------------
                 img = frames[0]
@@ -4050,6 +4180,8 @@ class App:
 
     def _schedule_next_bg_frame(self):
         """Arm the timer for the next background animation frame."""
+        if self._bg_anim_paused:
+            return
         if not self._bg_frames_photo or not self._bg_frame_durations:
             return
         try:
@@ -4073,6 +4205,8 @@ class App:
     def _bg_anim_tick(self):
         """Show the next frame of the animated background."""
         self._bg_anim_job = None
+        if self._bg_anim_paused:
+            return
         if not self._bg_frames_photo:
             return
         try:
@@ -4095,7 +4229,13 @@ class App:
             self._schedule_next_bg_frame()
 
     def _stop_bg_animation(self):
-        """Cancel the animation timer and drop PhotoImage references."""
+        """Cancel the animation timer and drop PhotoImage references.
+
+        NOTE: this does NOT touch self._bg_anim_paused. That flag is
+        driven by the player's state and represents the *intent*
+        ("should the animation run right now?"), while this method only
+        clears the *mechanics* (pending timer, cached frames).
+        """
         if self._bg_anim_job is not None:
             try:
                 self.root.after_cancel(self._bg_anim_job)
@@ -4105,6 +4245,27 @@ class App:
         self._bg_frames_photo = None
         self._bg_frame_durations = None
         self._bg_frame_index = 0
+
+    def _pause_bg_animation(self):
+        """Freeze the animation on its current frame."""
+        self._bg_anim_paused = True
+        if self._bg_anim_job is not None:
+            try:
+                self.root.after_cancel(self._bg_anim_job)
+            except Exception:
+                pass
+            self._bg_anim_job = None
+
+    def _resume_bg_animation(self):
+        """Start (or continue) the animation if frames are loaded."""
+        if not self._bg_frames_photo:
+            # Not animated, or frames not loaded yet. The next call to
+            # _render_bg() will sync with the player state anyway.
+            self._bg_anim_paused = False
+            return
+        self._bg_anim_paused = False
+        if self._bg_anim_job is None:
+            self._schedule_next_bg_frame()
 
     def _draw_hero_overlay(self):
         c = self.hero
@@ -4299,11 +4460,14 @@ class App:
                 continue
             if p not in self.playlist:
                 self.playlist.append(p)
-                self.listbox.insert("end", os.path.basename(p))
+                self.listbox.insert("end", self._format_pl_line(p))
                 added += 1
         self._update_pl_count()
         if added:
             self._persist_settings()
+            # Kick off a background probe so the durations appear
+            # shortly after the rows do.
+            self._probe_durations_async(self.playlist)
         if added and self.current_index < 0:
             self.play_index(0)
 
@@ -4644,17 +4808,32 @@ class App:
         self.dur_lbl.config(text=fmt_time(dur))
         title = m.get("title")
         artist = m.get("artist")
-        if title and artist:
-            self.player.title_text = f"{artist} — {title}"
-            if 0 <= self.current_index < len(self.playlist):
+
+        # Update the playlist row: display name from tags, plus the
+        # real duration from the container metadata (which is more
+        # precise than our background probe).
+        if 0 <= self.current_index < len(self.playlist):
+            path = self.playlist[self.current_index]
+            updated = False
+            if title and artist:
+                self.player.title_text = f"{artist} — {title}"
+                self._display_names[path] = f"{artist} - {title}"
+                updated = True
+            elif title:
+                self.player.title_text = title
+                self._display_names[path] = title
+                updated = True
+            if dur and dur > 0:
+                self._track_durations[path] = dur
+                updated = True
+            if updated:
                 try:
                     self.listbox.delete(self.current_index)
-                    self.listbox.insert(self.current_index, f"{artist} - {title}")
+                    self.listbox.insert(self.current_index, self._format_pl_line(path))
                     self.listbox.selection_set(self.current_index)
                 except Exception:
                     pass
-        elif title:
-            self.player.title_text = title
+
         parts = [m.get("format") or "media"]
         v, a = m.get("video"), m.get("audio")
         if v:
@@ -4688,6 +4867,19 @@ class App:
         glyph = {"playing": "▶", "paused": "II"}.get(s, "■")
         self.state_lbl.config(text=glyph)
         self.btn_play.config(text="||" if s == "playing" else "▶")
+
+        # Tie the animated background to the playback state:
+        #   playing   → animate
+        #   paused    → freeze on current frame
+        #   idle/stop → freeze on current frame
+        try:
+            if s == "playing":
+                self._resume_bg_animation()
+            else:
+                self._pause_bg_animation()
+        except Exception as e:
+            print(f"[XZN] BG state sync failed: {e}")
+
         if s == "idle":
             self.cur_lbl.config(text="00:00")
             self.seek.set(0)
