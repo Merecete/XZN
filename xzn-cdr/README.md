@@ -5,7 +5,7 @@ to MP3 / OGG / FLAC / WAV, with the same look like XZN.
 
 ## Screenshots
 
-![Main window](main.png)
+![Main window](Screenshots/main.png)
 
 ## Features
 
