@@ -1,6 +1,6 @@
 # Xenon-Zones (XZN)
 
-Xenon-Zones (XZN) is a fast, lightweight, and natively compiled media player for Windows, Linux, and macOS. Built with a focus on low resource consumption and a clean user experience, it is ideal for laptops, VMs, and minimal setups. XZN stands out with its modern, customizable interface and unique animated background support, offering a simple yet highly adaptable media playback experience
+Xenon-Zones (XZN) is a lightweight, cross-platform compiled media player for Windows, Linux, and macOS. Built with a focus on low resource consumption and a clean user experience, it is ideal for laptops, VMs, and minimal setups. XZN stands out with its modern, customizable interface and unique animated background support, offering a simple yet highly adaptable media playback experience
 
 ## Screenshots
 
