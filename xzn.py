@@ -18,6 +18,10 @@ Features
   (playback is tied to the player: the animation runs only while
   a track is actually playing and freezes on pause/stop)
 - Auto-saves playlist and settings (crash-safe)
+- Gapless playback, ReplayGain volume leveling, resume on start
+- Type-to-search in the playlist, mini mode (click the XZN wordmark)
+- Media keys (Windows: global hotkeys, Linux: MPRIS via jeepney)
+- Writes a log file (xzn.log) to the app data directory
 - Ships with a built-in sample intro track (installed on first run)
 
 Platform notes
@@ -35,6 +39,7 @@ import json
 import time
 import queue
 import random
+import re
 import shutil
 import threading
 import traceback
@@ -46,6 +51,115 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter, ImageSequence
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
+
+
+# --- Log file ------------------------------------------------------------
+# Everything XZN prints (status lines, warnings, tracebacks) is mirrored
+# into xzn.log in the app data directory, so problems can be diagnosed
+# even in the windowed release builds, where there is no console at all.
+LOG_MAX_BYTES = 1_000_000
+LOG_PATH = None
+_LOG_LOCK = threading.Lock()
+
+
+class _LogTee:
+    """File-like object: writes to the original stream (if any) and to
+    the log file, prefixing each new line with a timestamp."""
+
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+        self._line_start = True
+        self.encoding = "utf-8"
+
+    def write(self, s):
+        if not s:
+            return 0
+        if self._stream is not None:
+            try:
+                self._stream.write(s)
+            except Exception:
+                pass
+        with _LOG_LOCK:
+            try:
+                out = []
+                for part in s.splitlines(keepends=True):
+                    if self._line_start:
+                        out.append(time.strftime("%Y-%m-%d %H:%M:%S  "))
+                    out.append(part)
+                    self._line_start = part.endswith("\n")
+                self._fh.write("".join(out))
+                self._fh.flush()
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for f in (self._stream, self._fh):
+            try:
+                if f is not None:
+                    f.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+def setup_logging(log_dir):
+    """Mirror stdout/stderr into <log_dir>/xzn.log. The previous log is
+    kept as xzn.log.1 once the file grows beyond LOG_MAX_BYTES."""
+    global LOG_PATH
+    if not log_dir:
+        return None
+    path = os.path.join(log_dir, "xzn.log")
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+        fh = open(path, "a", encoding="utf-8", errors="replace")
+    except Exception as e:
+        print(f"[XZN] Could not open log file '{path}': {e}")
+        return None
+    fh.write("\n")
+    sys.stdout = _LogTee(sys.stdout, fh)
+    sys.stderr = _LogTee(sys.stderr, fh)
+    LOG_PATH = path
+    return path
+
+
+_SWALLOWED_SEEN = set()
+
+
+def _log_swallowed():
+    """Called from 'except Exception:' blocks that deliberately ignore an
+    error. Logs it once per code location, so the UI keeps running but
+    the log still shows what went wrong."""
+    et, ev, tb = sys.exc_info()
+    if et is None or tb is None:
+        return
+    code = tb.tb_frame.f_code
+    key = (code.co_filename, tb.tb_lineno, et.__name__)
+    if key in _SWALLOWED_SEEN or len(_SWALLOWED_SEEN) > 500:
+        return
+    _SWALLOWED_SEEN.add(key)
+    msg = str(ev).strip().replace("\n", " ")[:200]
+    print(f"[XZN] (ignored) {et.__name__}: {msg} — in {code.co_name}(), line {tb.tb_lineno}")
+
+
+def open_with_system(path):
+    """Open a file or folder with the platform's default application."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", path])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        print(f"[XZN] Could not open '{path}': {e}")
+
 
 # --- Windows: taskbar icon ----------------------------------------------
 if sys.platform == "win32":
@@ -319,7 +433,7 @@ def ensure_sample_track():
         if os.path.isfile(dst) and os.path.getsize(dst) > 0:
             return dst
     except Exception:
-        pass
+        _log_swallowed()
 
     try:
         shutil.copy2(src, dst)
@@ -448,6 +562,8 @@ def load_settings():
         "eq_preamp": 0.0,
         "sample_offered": False,
         "track_durations": {},
+        "replaygain": True,
+        "resume": None,
     }
     try:
         if os.path.isfile(SETTINGS_PATH):
@@ -486,6 +602,13 @@ def load_settings():
                     if isinstance(k, str) and isinstance(v, (int, float)) and v > 0:
                         cleaned[k] = float(v)
                 defaults["track_durations"] = cleaned
+            rg = data.get("replaygain")
+            if isinstance(rg, bool):
+                defaults["replaygain"] = rg
+            res = data.get("resume")
+            if isinstance(res, dict) and isinstance(res.get("path"), str) \
+                    and isinstance(res.get("pos"), (int, float)):
+                defaults["resume"] = {"path": res["path"], "pos": max(0.0, float(res["pos"]))}
     except Exception as e:
         print(f"[XZN] Failed to load settings: {e}")
     return defaults
@@ -503,10 +626,11 @@ def save_settings(state):
             "eq_preamp": float(state.get("eq_preamp") or 0.0),
             "sample_offered": bool(state.get("sample_offered", False)),
             "track_durations": dict(state.get("track_durations") or {}),
+            "replaygain": bool(state.get("replaygain", True)),
+            "resume": state.get("resume"),
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(f"[XZN] Settings saved → {SETTINGS_PATH}")
     except Exception as e:
         print(f"[XZN] Failed to save settings: {e}")
 
@@ -824,6 +948,86 @@ def write_tags(path, tags):
 
 
 # ------------------------------------------------------------------------
+# ReplayGain (volume leveling)
+# ------------------------------------------------------------------------
+_RG_NUM = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+
+
+def _rg_float(value):
+    m = _RG_NUM.search(str(value or ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _tag_first(v):
+    """Reduce a tag value from any mutagen format (ID3 frame, Vorbis list,
+    MP4 freeform bytes, APE value) to a plain string."""
+    if hasattr(v, "text"):
+        v = v.text
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", "ignore")
+    return str(v)
+
+
+def read_replaygain(path, *metadata_dicts):
+    """
+    Return (gain_db, peak) for a file, or None if it has no ReplayGain
+    information. Looks at the FFmpeg metadata first (FLAC, Ogg, many
+    MP3s), then at the tags via mutagen (ID3 TXXX, MP4 freeform, APE).
+    Track gain is preferred, album gain is the fallback. Opus R128 gains
+    are converted to the ReplayGain reference level.
+    """
+    tags = {}
+    for md in metadata_dicts:
+        try:
+            for k, v in (md or {}).items():
+                tags.setdefault(str(k).lower(), str(v))
+        except Exception:
+            _log_swallowed()
+
+    if _MUTAGEN_AVAILABLE and "replaygain_track_gain" not in tags:
+        try:
+            mf = MutagenFile(path)
+            if mf is not None and mf.tags is not None:
+                for k, v in mf.tags.items():
+                    # "TXXX:REPLAYGAIN_TRACK_GAIN", "----:com.apple.iTunes:
+                    # replaygain_track_gain" → "replaygain_track_gain"
+                    key = str(k).lower().rsplit(":", 1)[-1]
+                    tags.setdefault(key, _tag_first(v))
+        except Exception:
+            _log_swallowed()
+
+    for scope in ("track", "album"):
+        gain = _rg_float(tags.get(f"replaygain_{scope}_gain"))
+        if gain is not None:
+            peak = _rg_float(tags.get(f"replaygain_{scope}_peak"))
+            return gain, (peak if peak and peak > 0 else None)
+        r128 = _rg_float(tags.get(f"r128_{scope}_gain"))
+        if r128 is not None:
+            # Q7.8 fixed point relative to -23 LUFS; ReplayGain uses -18.
+            return r128 / 256.0 + 5.0, None
+    return None
+
+
+def replaygain_factor(rg, preamp_db=0.0):
+    """Linear gain for a read_replaygain() result, limited so the track
+    peak never exceeds full scale."""
+    if not rg:
+        return 1.0
+    gain_db, peak = rg
+    f = 10.0 ** ((gain_db + preamp_db) / 20.0)
+    if peak:
+        f = min(f, 1.0 / peak)
+    return max(0.05, min(f, 8.0))
+
+
+# ------------------------------------------------------------------------
 class RingBuffer:
     def __init__(self, capacity_frames):
         self.buf = np.zeros((capacity_frames, 2), dtype=np.float32)
@@ -1062,6 +1266,15 @@ class Player(threading.Thread):
 
         self.eq = Equalizer(SAMPLE_RATE, EQ_BANDS)
 
+        # Gapless playback: the app installs a callable that returns the
+        # path of the track that should follow the current one (or None).
+        # It is called from this thread shortly before a track ends.
+        self.next_provider = None
+        self.gapless = True
+        # ReplayGain: linear gain applied to the samples being decoded.
+        self.replaygain_enabled = True
+        self._dec_rg = None
+
         self.stream = None
         try:
             self.stream = sd.OutputStream(
@@ -1083,7 +1296,7 @@ class Player(threading.Thread):
         except Exception as e:
             print(f"[XZN] WARNING: no audio output → {e}")
 
-    def open_file(self, path):
+    def open_file(self, path, start_pos=0.0):
         self.current_path = path
         self.title_text = os.path.basename(path)
         self._gen += 1
@@ -1091,7 +1304,10 @@ class Player(threading.Thread):
         self._want_resume = False
         self._want_stop = False
         self._pending_seek = None
-        self.cmds.put(("open", path, self._gen))
+        self.cmds.put(("open", path, self._gen, float(start_pos or 0.0)))
+
+    def set_replaygain(self, enabled):
+        self.replaygain_enabled = bool(enabled)
 
     def pause(self):
         self._want_pause = True
@@ -1155,7 +1371,7 @@ class Player(threading.Thread):
                 continue
             if cmd[0] == "open":
                 try:
-                    self._play_file(cmd[1], cmd[2])
+                    self._play_file(cmd[1], cmd[2], cmd[3])
                 except Exception as e:
                     print(f"[XZN] Player thread crashed: {e}")
                     traceback.print_exc()
@@ -1175,7 +1391,7 @@ class Player(threading.Thread):
                 elif s.type == "audio":
                     astreams.append(s)
             except Exception:
-                pass
+                _log_swallowed()
         v = max(vstreams, key=lambda s: (s.width or 0) * (s.height or 0)) if vstreams else None
         a = astreams[0] if astreams else None
         return v, a
@@ -1204,7 +1420,7 @@ class Player(threading.Thread):
                     if d > 0:
                         duration = max(duration, d)
                 except Exception:
-                    pass
+                    _log_swallowed()
         if not duration:
             try:
                 duration = float(cont.duration) / 1_000_000
@@ -1218,7 +1434,7 @@ class Player(threading.Thread):
                 if r and float(r) > 1:
                     fps = round(float(r), 2)
             except Exception:
-                pass
+                _log_swallowed()
             vinfo = (vs.codec_context.name, vs.width, vs.height, fps)
         ainfo = None
         if as_ is not None:
@@ -1290,28 +1506,169 @@ class Player(threading.Thread):
                 time.sleep(chunk)
                 slept += chunk
 
-    def _play_file(self, path, gen):
-        print(f"[XZN] Opening: {path}")
-        cont = None
-        resampler = None
+    # --- Track contexts ------------------------------------------------
+    # A "track context" bundles everything needed to decode one file:
+    # the container, its streams, the resampler and the demux iterator.
+    # Normally one context is both played and decoded. For gapless
+    # playback the next track is opened and decoded into the ring buffer
+    # while the tail of the current one is still being heard; the switch
+    # (title, duration, clock) happens when the first sample of the new
+    # track actually reaches the speakers.
+
+    def _new_resampler(self):
         try:
-            cont = av.open(path)
+            return av.AudioResampler(format="fltp", layout="stereo",
+                                     rate=SAMPLE_RATE)
+        except Exception as e:
+            print(f"[XZN] Resampler create failed: {e}")
+            return None
+
+    def _open_track(self, path):
+        """Open a file and build its track context. Raises if the file
+        can't be opened; returns None if it has no playable streams."""
+        cont = av.open(path)
+        try:
+            self._enable_hw_threads(cont)
+            vstream, astream = self._pick_streams(cont)
+            if vstream is None and astream is None:
+                cont.close()
+                return None
+            meta = self._collect_meta(cont, vstream, astream)
+            time_offset = self._detect_pts_offset(cont, vstream, astream)
+            rg = None
+            if astream is not None:
+                try:
+                    rg = read_replaygain(path, cont.metadata,
+                                         getattr(astream, "metadata", None))
+                except Exception:
+                    _log_swallowed()
+            if rg:
+                print(f"[XZN] ReplayGain: {rg[0]:+.2f} dB"
+                      + (f", peak {rg[1]:.3f}" if rg[1] else ""))
+            return {
+                "path": path, "cont": cont,
+                "vstream": vstream, "astream": astream,
+                "meta": meta, "time_offset": time_offset, "rg": rg,
+                "resampler": self._new_resampler() if astream is not None else None,
+                "demux": cont.demux(), "flushed": False,
+            }
+        except Exception:
+            try:
+                cont.close()
+            except Exception:
+                _log_swallowed()
+            raise
+
+    def _close_track(self, ctx):
+        if ctx is None:
+            return
+        try:
+            ctx["cont"].close()
+        except Exception:
+            _log_swallowed()
+
+    def _flush_track(self, ctx):
+        """Push the resampler's last samples into the ring buffer."""
+        if ctx is None or ctx["flushed"] or ctx["resampler"] is None:
+            return
+        ctx["flushed"] = True
+        try:
+            for rf in ctx["resampler"].resample(None):
+                self._write_audio_frame(rf)
+        except Exception as e:
+            print(f"[XZN] resampler flush failed: {e}")
+
+    def _prepare_gapless(self, cur):
+        """
+        Called once the current track is fully decoded. Opens the next
+        track and returns a pending switch, or None if playback should
+        simply end (no next track, video involved, or an error).
+        """
+        if not self.gapless or cur["vstream"] is not None or self.next_provider is None:
+            return None
+        try:
+            nxt_path = self.next_provider()
+        except Exception as e:
+            print(f"[XZN] next_provider failed: {e}")
+            return None
+        if not nxt_path or not os.path.isfile(nxt_path):
+            return None
+        try:
+            ctx = self._open_track(nxt_path)
+        except Exception as e:
+            print(f"[XZN] Gapless: could not open next track: {e}")
+            return None
+        if ctx is None:
+            return None
+        if ctx["vstream"] is not None or ctx["astream"] is None:
+            # Videos get the normal start-up (window, sync, prebuffer).
+            self._close_track(ctx)
+            return None
+
+        # The new track's first sample is heard once everything already
+        # in the ring buffer and the output device has been played.
+        with self._clock_lock:
+            switch_frame = (self._played_frames + self.ring.available()
+                            + int(self._out_latency * SAMPLE_RATE))
+        self._head_t = 0.0
+        self._skip_until = 0.0
+        self._dec_rg = ctx["rg"]
+        print(f"[XZN] Gapless: queued {os.path.basename(nxt_path)}")
+        return {"ctx": ctx, "switch_frame": switch_frame}
+
+    def _commit_gapless(self, pending):
+        """The queued track has become audible: make it the current one."""
+        ctx = pending["ctx"]
+        meta = ctx["meta"]
+        self.current_path = ctx["path"]
+        self.title_text = os.path.basename(ctx["path"])
+        self.duration = meta["duration"]
+        self.has_video = False
+        self.video_size_native = (0, 0)
+        self._paused_pos = 0.0
+        with self._clock_lock:
+            self._audio_start_frame = pending["switch_frame"]
+            self._audio_start_media = 0.0
+        self._t0_media = 0.0
+        self._t0_mono = time.monotonic()
+        self.events.put(("advanced", ctx["path"]))
+        self.events.put(("meta", meta))
+        print(f"[XZN] Gapless: now playing {self.title_text}")
+
+    def _play_file(self, path, gen, start_pos=0.0):
+        print(f"[XZN] Opening: {path}")
+        try:
+            cur = self._open_track(path)
         except Exception as e:
             print(f"[XZN] OPEN FAILED: {e}")
             traceback.print_exc()
             self.events.put(("error", f"Could not open file:\n{e}"))
             return
+        if cur is None:
+            self.events.put(("error", "No playable audio or video streams found."))
+            return
+
+        dec = cur          # the context whose packets are being decoded
+        pending = None     # gapless: next track decoded, not yet audible
+        dec_eof = False    # dec has no more packets
+        draining = False   # last track decoded, ring buffer playing out
+
+        def abandon_pending():
+            # Pause/seek during a gapless hand-over: drop the prepared
+            # next track and continue with the one still being heard.
+            nonlocal pending, dec, dec_eof, draining
+            if pending is not None:
+                self._close_track(pending["ctx"])
+                pending = None
+                print("[XZN] Gapless: hand-over cancelled")
+            dec = cur
+            dec_eof = False
+            draining = False
+            self._dec_rg = cur["rg"]
 
         try:
             self.eq.reset_state()
-            self._enable_hw_threads(cont)
-            vstream, astream = self._pick_streams(cont)
-            if vstream is None and astream is None:
-                cont.close()
-                self.events.put(("error", "No playable audio or video streams found."))
-                return
-
-            meta = self._collect_meta(cont, vstream, astream)
+            meta = cur["meta"]
             self.duration = meta["duration"]
             self.state = "playing"
             self._paused_pos = 0.0
@@ -1321,6 +1678,7 @@ class Player(threading.Thread):
             self._t0_media = 0.0
             self._t0_mono = time.monotonic()
             self._clock_running = False
+            self._dec_rg = cur["rg"]
             self.ring.clear()
             self.vbuf.clear()
 
@@ -1328,28 +1686,19 @@ class Player(threading.Thread):
                 self._audio_start_frame = None
                 self._audio_start_media = 0.0
 
+            vstream = cur["vstream"]
             self.has_video = (vstream is not None)
             self.video_size_native = (vstream.width, vstream.height) if vstream is not None else (0, 0)
             self.events.put(("meta", meta))
             self.events.put(("state", "playing"))
 
-            time_offset = self._detect_pts_offset(cont, vstream, astream)
+            # Resume where the user left off last session.
+            if start_pos and start_pos > 1.0 and (self.duration <= 0 or start_pos < self.duration - 1.0):
+                self._pending_seek = start_pos
 
-            if astream is not None:
-                try:
-                    resampler = av.AudioResampler(
-                        format="fltp",
-                        layout="stereo",
-                        rate=SAMPLE_RATE
-                    )
-                except Exception as e:
-                    print(f"[XZN] Resampler create failed: {e}")
-                    resampler = None
-
-            demux_iter = cont.demux()
             packet_count = 0
             has_video = vstream is not None
-            has_audio = astream is not None
+            has_audio = cur["astream"] is not None
             prebuffer_done = False
 
             PREBUFFER  = int(SAMPLE_RATE * 0.5)
@@ -1357,19 +1706,29 @@ class Player(threading.Thread):
 
             while not self._want_stop and self._gen == gen:
 
+                # Gapless: has the queued track reached the speakers?
+                if pending is not None:
+                    with self._clock_lock:
+                        reached = self._played_frames >= pending["switch_frame"]
+                    if reached:
+                        self._close_track(cur)
+                        cur = pending["ctx"]
+                        self._commit_gapless(pending)
+                        pending = None
+                        has_video = False
+                        has_audio = True
+                        continue
+
                 if self._pending_seek is not None:
+                    abandon_pending()
                     target = self._pending_seek
                     self._pending_seek = None
                     try:
-                        cont.seek(int((target + time_offset) * av.time_base),
-                                  any_frame=False, backward=True)
-                        if astream is not None:
-                            try:
-                                resampler = av.AudioResampler(
-                                    format="fltp", layout="stereo",
-                                    rate=SAMPLE_RATE)
-                            except Exception:
-                                resampler = None
+                        cur["cont"].seek(int((target + cur["time_offset"]) * av.time_base),
+                                         any_frame=False, backward=True)
+                        if cur["astream"] is not None:
+                            cur["resampler"] = self._new_resampler()
+                            cur["flushed"] = False
                         self.ring.clear()
                         self.vbuf.clear()
                         self.eq.reset_state()
@@ -1383,7 +1742,7 @@ class Player(threading.Thread):
                             self._audio_start_frame = None
                             self._audio_start_media = target
                         prebuffer_done = False
-                        demux_iter = cont.demux()
+                        cur["demux"] = cur["cont"].demux()
                         print(f"[XZN] Seek → {target:.2f}s")
                     except Exception as e:
                         print(f"[XZN] Seek failed: {e}")
@@ -1391,6 +1750,7 @@ class Player(threading.Thread):
                     continue
 
                 if self._want_pause and self.state == "playing":
+                    abandon_pending()
                     self._paused_pos = min(self.position(), self.duration) if self.duration > 0 else self.position()
                     self.ring.clear()
                     self.state = "paused"
@@ -1409,11 +1769,36 @@ class Player(threading.Thread):
                     self._want_resume = False
                     self._clock_running = False
                     prebuffer_done = False
+                    # Pausing discarded the decoded-but-unplayed audio
+                    # (up to 1.5 s). Seek back to the exact pause point
+                    # so nothing is skipped on resume.
+                    self._pending_seek = self._paused_pos
                     self.events.put(("state", "playing"))
                     continue
 
                 if self.state == "paused":
                     time.sleep(0.02)
+                    continue
+
+                if dec_eof:
+                    if pending is not None:
+                        # The queued track is already fully decoded (a very
+                        # short file); wait until it becomes audible.
+                        time.sleep(0.005)
+                        continue
+                    if not draining:
+                        pending = self._prepare_gapless(cur)
+                        if pending is not None:
+                            dec = pending["ctx"]
+                            dec_eof = False
+                            continue
+                        draining = True
+                    # Nothing follows: let the buffered audio play out here
+                    # (not in a blocking drain) so pause and seek still work
+                    # during the last second of the track.
+                    if self.ring.available() == 0:
+                        break
+                    time.sleep(0.01)
                     continue
 
                 if has_video and self.vbuf.size() > 60:
@@ -1446,22 +1831,34 @@ class Player(threading.Thread):
                         self._clock_running = True
 
                 try:
-                    packet = next(demux_iter)
+                    packet = next(dec["demux"])
                 except StopIteration:
-                    break
+                    self._flush_track(dec)
+                    dec_eof = True
+                    if not prebuffer_done:
+                        # Track shorter than the prebuffer: start the clock.
+                        prebuffer_done = True
+                        with self._clock_lock:
+                            self._audio_start_frame = self._played_frames
+                            self._audio_start_media = 0.0
+                        self._clock_running = True
+                    continue
                 except Exception as e:
                     print(f"[XZN] demux error: {e}")
+                    if pending is not None:
+                        abandon_pending()
                     break
 
                 packet_count += 1
 
                 try:
-                    if vstream is not None and packet.stream.index == vstream.index:
+                    vs, as_ = dec["vstream"], dec["astream"]
+                    if vs is not None and packet.stream.index == vs.index:
                         for vf in packet.decode():
-                            self._on_video(vf, vstream, time_offset)
-                    elif astream is not None and packet.stream.index == astream.index:
+                            self._on_video(vf, vs, dec["time_offset"])
+                    elif as_ is not None and packet.stream.index == as_.index:
                         for af in packet.decode():
-                            self._on_audio(af, astream, resampler, time_offset)
+                            self._on_audio(af, as_, dec["resampler"], dec["time_offset"])
                 except Exception as e:
                     print(f"[XZN] packet decode error: {e}")
 
@@ -1472,24 +1869,19 @@ class Player(threading.Thread):
             traceback.print_exc()
             self.events.put(("error", str(e)))
         finally:
-            if resampler is not None:
-                try:
-                    for rf in resampler.resample(None):
-                        self._write_audio_frame(rf)
-                except Exception as e:
-                    print(f"[XZN] resampler flush failed: {e}")
+            if pending is not None:
+                self._close_track(pending["ctx"])
+                pending = None
 
-            if not self._want_stop:
+            self._flush_track(cur)
+
+            if not self._want_stop and self._gen == gen:
                 try:
                     self._drain_ring(timeout=8.0)
                 except Exception as e:
                     print(f"[XZN] drain failed: {e}")
 
-            if cont is not None:
-                try:
-                    cont.close()
-                except Exception:
-                    pass
+            self._close_track(cur)
 
             self.ring.clear()
             self.vbuf.clear()
@@ -1500,7 +1892,7 @@ class Player(threading.Thread):
                 self._audio_start_frame = None
             self.events.put(("state", "idle"))
             if not user_stopped and self._gen == gen:
-                self.events.put(("ended", path))
+                self.events.put(("ended", cur["path"]))
 
     def _on_video(self, vf, vstream, time_offset):
         if self.state != "playing":
@@ -1511,7 +1903,7 @@ class Player(threading.Thread):
             if r and float(r) > 1:
                 fps = float(r)
         except Exception:
-            pass
+            _log_swallowed()
 
         tb = vstream.time_base
         if vf.pts is not None and tb is not None:
@@ -1558,6 +1950,9 @@ class Player(threading.Thread):
             arr = arr[:2]
 
         f = arr.T.astype(np.float32)
+
+        if self.replaygain_enabled and self._dec_rg:
+            f *= replaygain_factor(self._dec_rg)
 
         peak = np.max(np.abs(f)) if len(f) else 0.0
         if peak > 0.98:
@@ -1646,7 +2041,7 @@ class VideoWindow:
             try:
                 app._attach_macos_menu(self.win)
             except Exception:
-                pass
+                _log_swallowed()
 
         self.canvas = tk.Canvas(self.win, bg="#0a0812", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -1773,7 +2168,7 @@ class VideoWindow:
             y = max(0, min(xy[1], sh - 100))
             self.win.geometry(f"+{x}+{y}")
         except Exception:
-            pass
+            _log_swallowed()
 
     def is_alive(self):
         try:
@@ -1795,7 +2190,7 @@ class VideoWindow:
                 secondary = getattr(self, "_idle_secondary", "")
                 self._draw_idle_card(primary, secondary)
         except Exception:
-            pass
+            _log_swallowed()
 
     def apply_palette(self, palette):
         try:
@@ -1804,7 +2199,7 @@ class VideoWindow:
             self.win.configure(bg=palette["SUNKEN"])
             self.canvas.configure(bg=palette["SUNKEN"])
         except Exception:
-            pass
+            _log_swallowed()
 
     def show(self):
         try:
@@ -1813,7 +2208,7 @@ class VideoWindow:
             try:
                 self.win.attributes("-alpha", 1.0)
             except Exception:
-                pass
+                _log_swallowed()
 
             # First show ever? Place next to the main window.
             self._position_next_to_main()
@@ -1844,7 +2239,7 @@ class VideoWindow:
                             title = ""
                     self._draw_idle_card("", title)
             except Exception:
-                pass
+                _log_swallowed()
         except Exception as e:
             print(f"[XZN] VideoWindow.show failed: {e}")
 
@@ -1859,7 +2254,7 @@ class VideoWindow:
             if self.is_alive():
                 self.win.withdraw()
         except Exception:
-            pass
+            _log_swallowed()
         self._photo = None
         self._last_gen = -1
         self._scaled_cache = None
@@ -1900,7 +2295,7 @@ class VideoWindow:
         try:
             self.win.geometry(geom)
         except Exception:
-            pass
+            _log_swallowed()
         self._normal_geometry = geom
 
     def toggle_fullscreen(self, event=None):
@@ -1917,11 +2312,11 @@ class VideoWindow:
             try:
                 self.win.attributes("-alpha", 1.0)
             except Exception:
-                pass
+                _log_swallowed()
             self.win.attributes("-fullscreen", True)
             self._fullscreen = True
         except Exception:
-            pass
+            _log_swallowed()
 
     def exit_fullscreen(self):
         if not self._fullscreen:
@@ -1932,9 +2327,9 @@ class VideoWindow:
             try:
                 self.win.attributes("-alpha", 1.0)
             except Exception:
-                pass
+                _log_swallowed()
         except Exception:
-            pass
+            _log_swallowed()
         self._fullscreen = False
 
     def show_placeholder(self, primary_text="", secondary_text=""):
@@ -2047,7 +2442,7 @@ class VideoWindow:
                     fill="#9a94b0", anchor="center",
                 )
             except Exception:
-                pass
+                _log_swallowed()
 
     def update_frame(self, img, gen):
         if img is None or not self.is_alive():
@@ -2111,7 +2506,7 @@ def show_license_window(parent, palette, app=None):
         try:
             app._attach_macos_menu(win)
         except Exception:
-            pass
+            _log_swallowed()
 
     # --- Close handler that also unregisters the window -----------------
     def _close():
@@ -2120,11 +2515,11 @@ def show_license_window(parent, palette, app=None):
                 if win in app._extra_alpha_windows:
                     app._extra_alpha_windows.remove(win)
             except Exception:
-                pass
+                _log_swallowed()
         try:
             win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
 
     win.protocol("WM_DELETE_WINDOW", _close)
 
@@ -2189,7 +2584,7 @@ def show_license_window(parent, palette, app=None):
         h = win.winfo_height()
         win.geometry(f"+{mx - w // 2}+{my - h // 2}")
     except Exception:
-        pass
+        _log_swallowed()
 
     # Register with the app so it participates in the alpha system,
     # then apply the current alpha immediately.
@@ -2197,16 +2592,16 @@ def show_license_window(parent, palette, app=None):
         try:
             app._extra_alpha_windows.append(win)
         except Exception:
-            pass
+            _log_swallowed()
         try:
             win.after(30, app._apply_alpha_to_windows)
         except Exception:
-            pass
+            _log_swallowed()
 
     try:
         win.focus_set()
     except Exception:
-        pass
+        _log_swallowed()
 
 
 # ------------------------------------------------------------------------
@@ -2225,7 +2620,7 @@ class InfoWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         p = palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
@@ -2297,17 +2692,25 @@ class InfoWindow:
             palette=p, padx=10, pady=4
         ).pack(side="left")
 
+        # Opens xzn.log, e.g. to attach it to a bug report.
+        if LOG_PATH:
+            make_flat_button(
+                btn_row, "Log",
+                lambda: open_with_system(LOG_PATH),
+                palette=p, padx=10, pady=4
+            ).pack(side="left", padx=(6, 0))
+
         # --- Close handler that also unregisters ------------------------
         def _close_info():
             try:
                 if self.win in self.app._extra_alpha_windows:
                     self.app._extra_alpha_windows.remove(self.win)
             except Exception:
-                pass
+                _log_swallowed()
             try:
                 self.win.destroy()
             except Exception:
-                pass
+                _log_swallowed()
 
         make_flat_button(
             btn_row, "Close",
@@ -2329,7 +2732,7 @@ class InfoWindow:
         try:
             self.app._extra_alpha_windows.append(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
 
 # ------------------------------------------------------------------------
@@ -2348,7 +2751,7 @@ class ThemeWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         p = app.palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=18, pady=16)
@@ -2399,14 +2802,14 @@ class ThemeWindow:
         try:
             self.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         self.app.apply_accent(color, persist=True, rebuild=True)
 
     def _reset(self):
         try:
             self.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         self.app.apply_accent(DEFAULT_PALETTE["ACCENT"], persist=True, rebuild=True)
 
 
@@ -2442,13 +2845,13 @@ class FlatOptionMenu:
             try:
                 self.var.trace("w", lambda *a: self._update_text())
             except Exception:
-                pass
+                _log_swallowed()
 
     def _update_text(self):
         try:
             self.btn.config(text=self.var.get())
         except Exception:
-            pass
+            _log_swallowed()
 
     def grid(self, **kwargs):
         self.btn.grid(**kwargs)
@@ -2469,7 +2872,7 @@ class FlatOptionMenu:
         try:
             self._popup.attributes("-topmost", True)
         except Exception:
-            pass
+            _log_swallowed()
 
         inner = tk.Frame(self._popup, bg=p["RAISED"], bd=0, highlightthickness=0)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
@@ -2492,7 +2895,7 @@ class FlatOptionMenu:
         try:
             self._popup.focus_set()
         except Exception:
-            pass
+            _log_swallowed()
 
         self._popup.bind("<FocusOut>", lambda e: self._close())
         self._popup.bind("<Escape>", lambda e: self._close())
@@ -2519,12 +2922,12 @@ class FlatOptionMenu:
         try:
             self.var.set(value)
         except Exception:
-            pass
+            _log_swallowed()
         if self.on_change is not None:
             try:
                 self.on_change(value)
             except Exception:
-                pass
+                _log_swallowed()
         self._close()
 
     def _close(self):
@@ -2533,11 +2936,11 @@ class FlatOptionMenu:
         try:
             self.btn.unbind_all("<Button-1>")
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self._popup.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         self._popup = None
 
 
@@ -2620,7 +3023,7 @@ class EqualizerWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         self._syncing = False
 
@@ -2709,6 +3112,11 @@ class EqualizerWindow:
         footer.pack(fill="x", padx=10, pady=(0, 10))
         make_flat_button(footer, "Reset", self._reset, palette=p,
                          padx=10, pady=3).pack(side="left")
+        # Volume leveling via ReplayGain tags (see read_replaygain).
+        self.btn_level = make_flat_button(footer, "", self._toggle_level,
+                                          palette=p, padx=10, pady=3)
+        self.btn_level.pack(side="left", padx=(6, 0))
+        self._sync_level_button()
         make_flat_button(footer, "Close", self.win.destroy, palette=p,
                          padx=10, pady=3).pack(side="right")
 
@@ -2732,6 +3140,15 @@ class EqualizerWindow:
         en = not bool(getattr(self.app, "_eq_enabled", True))
         self.app.set_eq_enabled(en)
         self._sync_on_button()
+
+    def _sync_level_button(self):
+        en = bool(getattr(self.app, "_replaygain", True))
+        self.btn_level.config(text="Level: ON" if en else "Level: OFF",
+                              fg=self.palette["ACCENT"] if en else self.palette["GRAY"])
+
+    def _toggle_level(self):
+        self.app.set_replaygain(not bool(getattr(self.app, "_replaygain", True)))
+        self._sync_level_button()
 
     def _on_preamp(self, v):
         if self._syncing:
@@ -2811,7 +3228,7 @@ class TagEditorWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         outer = tk.Frame(self.win, bg=p["PANEL"], padx=20, pady=18)
         outer.pack(fill="both", expand=True)
@@ -2882,7 +3299,7 @@ class TagEditorWindow:
             self._entries["title"].focus_set()
             self._entries["title"].icursor("end")
         except Exception:
-            pass
+            _log_swallowed()
 
     def _save(self):
         new_tags = {}
@@ -2986,7 +3403,7 @@ def _on_any_click(root_widget, event):
                 try:
                     popup.destroy()
                 except Exception:
-                    pass
+                    _log_swallowed()
                 reg.discard(popup)
         except Exception:
             reg.discard(popup)
@@ -3005,7 +3422,7 @@ class BgPopup:
         try:
             self.win.attributes("-topmost", True)
         except Exception:
-            pass
+            _log_swallowed()
 
         inner = tk.Frame(self.win, bg=p["RAISED"], bd=0, highlightthickness=0)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
@@ -3100,19 +3517,301 @@ class BgPopup:
             try:
                 self.app.root.unbind_all("<Button-1>")
             except Exception:
-                pass
+                _log_swallowed()
             self._outside_bind_id = None
         # Unregister from the global registry (safety net)
         try:
             unregister_popup(self.app.root, self.win)
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         if getattr(self.app, "_bg_popup", None) is self:
             self.app._bg_popup = None
+
+
+# ------------------------------------------------------------------------
+# Media keys
+# ------------------------------------------------------------------------
+# Both backends run in their own daemon thread and only ever put
+# ("mediakey", action) tuples into the app's event queue, which the Tk
+# thread polls. Actions: playpause, play, pause, stop, next, prev.
+
+class WindowsMediaKeys:
+    """Global hotkeys for the keyboard media keys (Windows, ctypes only).
+    If another program already owns a key, that key is skipped."""
+
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+    MOD_NOREPEAT = 0x4000
+    KEYS = {1: (0xB3, "playpause"), 2: (0xB0, "next"),
+            3: (0xB1, "prev"), 4: (0xB2, "stop")}
+
+    def __init__(self, events):
+        self.events = events
+        self._tid = None
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="xzn-mediakeys")
+
+    def start(self):
+        self._thread.start()
+
+    def update(self, **status):
+        pass  # nothing to publish on Windows
+
+    def _run(self):
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        registered = []
+        for hk_id, (vk, name) in self.KEYS.items():
+            if user32.RegisterHotKey(None, hk_id, self.MOD_NOREPEAT, vk):
+                registered.append(hk_id)
+            else:
+                print(f"[XZN] Media key '{name}' is in use by another program")
+        if not registered:
+            return
+        print(f"[XZN] Media keys active ({len(registered)} keys)")
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == self.WM_HOTKEY and msg.wParam in self.KEYS:
+                    self.events.put(("mediakey", self.KEYS[msg.wParam][1]))
+        finally:
+            for hk_id in registered:
+                user32.UnregisterHotKey(None, hk_id)
+
+    def stop(self):
+        if self._tid:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(self._tid, self.WM_QUIT, 0, 0)
+            except Exception:
+                _log_swallowed()
+
+
+class MprisMediaKeys:
+    """
+    Linux: registers XZN as an MPRIS media player on the session D-Bus
+    (org.mpris.MediaPlayer2.xzn). Desktop environments route the media
+    keys to MPRIS players and show title/status in their media widgets.
+    Uses 'jeepney' (pure Python); without it this backend is skipped.
+    """
+
+    BUS_NAME = "org.mpris.MediaPlayer2.xzn"
+    PATH = "/org/mpris/MediaPlayer2"
+    ROOT_IF = "org.mpris.MediaPlayer2"
+    PLAYER_IF = "org.mpris.MediaPlayer2.Player"
+    PROPS_IF = "org.freedesktop.DBus.Properties"
+
+    INTROSPECT = """<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+ <interface name="org.freedesktop.DBus.Introspectable">
+  <method name="Introspect"><arg type="s" direction="out"/></method>
+ </interface>
+ <interface name="org.freedesktop.DBus.Properties">
+  <method name="Get"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="out"/></method>
+  <method name="GetAll"><arg type="s" direction="in"/><arg type="a{sv}" direction="out"/></method>
+  <method name="Set"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="in"/></method>
+  <signal name="PropertiesChanged"><arg type="s"/><arg type="a{sv}"/><arg type="as"/></signal>
+ </interface>
+ <interface name="org.mpris.MediaPlayer2">
+  <method name="Raise"/><method name="Quit"/>
+  <property name="CanQuit" type="b" access="read"/>
+  <property name="CanRaise" type="b" access="read"/>
+  <property name="HasTrackList" type="b" access="read"/>
+  <property name="Identity" type="s" access="read"/>
+  <property name="SupportedUriSchemes" type="as" access="read"/>
+  <property name="SupportedMimeTypes" type="as" access="read"/>
+ </interface>
+ <interface name="org.mpris.MediaPlayer2.Player">
+  <method name="Next"/><method name="Previous"/><method name="Pause"/>
+  <method name="PlayPause"/><method name="Stop"/><method name="Play"/>
+  <method name="Seek"><arg type="x" direction="in"/></method>
+  <method name="SetPosition"><arg type="o" direction="in"/><arg type="x" direction="in"/></method>
+  <method name="OpenUri"><arg type="s" direction="in"/></method>
+  <signal name="Seeked"><arg type="x"/></signal>
+  <property name="PlaybackStatus" type="s" access="read"/>
+  <property name="Rate" type="d" access="read"/>
+  <property name="Metadata" type="a{sv}" access="read"/>
+  <property name="Volume" type="d" access="read"/>
+  <property name="Position" type="x" access="read"/>
+  <property name="MinimumRate" type="d" access="read"/>
+  <property name="MaximumRate" type="d" access="read"/>
+  <property name="CanGoNext" type="b" access="read"/>
+  <property name="CanGoPrevious" type="b" access="read"/>
+  <property name="CanPlay" type="b" access="read"/>
+  <property name="CanPause" type="b" access="read"/>
+  <property name="CanSeek" type="b" access="read"/>
+  <property name="CanControl" type="b" access="read"/>
+ </interface>
+</node>"""
+
+    ACTIONS = {"PlayPause": "playpause", "Play": "play", "Pause": "pause",
+               "Stop": "stop", "Next": "next", "Previous": "prev"}
+
+    def __init__(self, events, position_fn=None):
+        self.events = events
+        self.position_fn = position_fn
+        self._lock = threading.Lock()
+        self._status = "Stopped"
+        self._title = ""
+        self._artist = ""
+        self._length = 0.0
+        self._track_no = 0
+        self._outbox = queue.Queue()
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="xzn-mpris")
+
+    @staticmethod
+    def available():
+        try:
+            import jeepney  # noqa: F401
+            return bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
+        except Exception:
+            return False
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    # --- state published to the desktop ---------------------------------
+    def update(self, status=None, title=None, artist=None, length=None, new_track=False):
+        changed = {}
+        with self._lock:
+            if status is not None and status != self._status:
+                self._status = status
+                changed["PlaybackStatus"] = ("s", status)
+            meta_changed = new_track
+            for attr, val in (("_title", title), ("_artist", artist), ("_length", length)):
+                if val is not None and val != getattr(self, attr):
+                    setattr(self, attr, val)
+                    meta_changed = True
+            if new_track:
+                self._track_no += 1
+            if meta_changed:
+                changed["Metadata"] = ("a{sv}", self._metadata())
+        if changed:
+            self._outbox.put(changed)
+
+    def _metadata(self):
+        md = {"mpris:trackid": ("o", f"/org/xzn/track/{self._track_no}")}
+        if self._title:
+            md["xesam:title"] = ("s", self._title)
+        if self._artist:
+            md["xesam:artist"] = ("as", [self._artist])
+        if self._length > 0:
+            md["mpris:length"] = ("x", int(self._length * 1_000_000))
+        return md
+
+    def _props(self, iface):
+        if iface == self.ROOT_IF:
+            return {
+                "CanQuit": ("b", False), "CanRaise": ("b", False),
+                "HasTrackList": ("b", False), "Identity": ("s", APP_NAME),
+                "SupportedUriSchemes": ("as", []), "SupportedMimeTypes": ("as", []),
+            }
+        if iface == self.PLAYER_IF:
+            pos = 0
+            try:
+                if self.position_fn is not None:
+                    pos = int(float(self.position_fn()) * 1_000_000)
+            except Exception:
+                _log_swallowed()
+            with self._lock:
+                return {
+                    "PlaybackStatus": ("s", self._status),
+                    "Rate": ("d", 1.0), "MinimumRate": ("d", 1.0), "MaximumRate": ("d", 1.0),
+                    "Metadata": ("a{sv}", self._metadata()),
+                    "Volume": ("d", 1.0), "Position": ("x", pos),
+                    "CanGoNext": ("b", True), "CanGoPrevious": ("b", True),
+                    "CanPlay": ("b", True), "CanPause": ("b", True),
+                    "CanSeek": ("b", False), "CanControl": ("b", True),
+                }
+        return None
+
+    # --- D-Bus loop -----------------------------------------------------
+    def _run(self):
+        try:
+            from jeepney import MessageType, HeaderFields, DBusAddress, \
+                new_method_return, new_error, new_signal
+            from jeepney.bus_messages import message_bus
+            from jeepney.io.blocking import open_dbus_connection
+        except Exception as e:
+            print(f"[XZN] MPRIS disabled (jeepney missing): {e}")
+            return
+        try:
+            conn = open_dbus_connection(bus="SESSION")
+            reply = conn.send_and_get_reply(message_bus.RequestName(self.BUS_NAME), timeout=5)
+            if reply.body[0] not in (1, 4):   # primary owner / already owner
+                print(f"[XZN] MPRIS name {self.BUS_NAME} is taken (another XZN running?)")
+                conn.close()
+                return
+        except Exception as e:
+            print(f"[XZN] MPRIS disabled (no session bus): {e}")
+            return
+        print("[XZN] Media keys active (MPRIS)")
+        emitter = DBusAddress(self.PATH, interface=self.PROPS_IF)
+
+        while self._running:
+            try:
+                while True:
+                    changed = self._outbox.get_nowait()
+                    conn.send(new_signal(emitter, "PropertiesChanged", "sa{sv}as",
+                                         (self.PLAYER_IF, changed, [])))
+            except queue.Empty:
+                pass
+            except Exception as e:
+                print(f"[XZN] MPRIS signal failed: {e}")
+            try:
+                msg = conn.receive(timeout=0.25)
+            except TimeoutError:
+                continue
+            except Exception as e:
+                print(f"[XZN] MPRIS connection lost: {e}")
+                break
+            hdr = msg.header
+            if hdr.message_type != MessageType.method_call:
+                continue
+            f = hdr.fields
+            iface = f.get(HeaderFields.interface, "")
+            member = f.get(HeaderFields.member, "")
+            try:
+                if f.get(HeaderFields.path) != self.PATH:
+                    resp = new_error(msg, "org.freedesktop.DBus.Error.UnknownObject")
+                elif member == "Introspect":
+                    resp = new_method_return(msg, "s", (self.INTROSPECT,))
+                elif iface == self.PROPS_IF and member == "GetAll":
+                    props = self._props(msg.body[0])
+                    resp = (new_method_return(msg, "a{sv}", (props,)) if props is not None
+                            else new_error(msg, "org.freedesktop.DBus.Error.UnknownInterface"))
+                elif iface == self.PROPS_IF and member == "Get":
+                    props = self._props(msg.body[0]) or {}
+                    if msg.body[1] in props:
+                        resp = new_method_return(msg, "v", (props[msg.body[1]],))
+                    else:
+                        resp = new_error(msg, "org.freedesktop.DBus.Error.UnknownProperty")
+                elif iface == self.PROPS_IF and member == "Set":
+                    resp = new_error(msg, "org.freedesktop.DBus.Error.PropertyReadOnly")
+                elif member in self.ACTIONS:
+                    self.events.put(("mediakey", self.ACTIONS[member]))
+                    resp = new_method_return(msg)
+                elif member in ("Raise", "Quit", "Seek", "SetPosition", "OpenUri"):
+                    resp = new_method_return(msg)   # accepted, not supported
+                else:
+                    resp = new_error(msg, "org.freedesktop.DBus.Error.UnknownMethod")
+                conn.send(resp)
+            except Exception as e:
+                print(f"[XZN] MPRIS request {iface}.{member} failed: {e}")
+        try:
+            conn.close()
+        except Exception:
+            _log_swallowed()
 
 
 # ------------------------------------------------------------------------
@@ -3154,6 +3853,8 @@ class App:
         self._eq_enabled = bool(settings.get("eq_enabled", True))
         self._eq_preamp = float(settings.get("eq_preamp") or 0.0)
         self._sample_offered = bool(settings.get("sample_offered", False))
+        self._replaygain = bool(settings.get("replaygain", True))
+        self._saved_resume = settings.get("resume")
         self.palette = build_palette(self.accent)
 
         # Runtime cache of track durations (path → seconds). Persisted
@@ -3175,6 +3876,8 @@ class App:
         self.player.set_eq_gains(self._eq_gains)
         self.player.set_eq_preamp(self._eq_preamp)
         self.player.set_eq_enabled(self._eq_enabled)
+        self.player.set_replaygain(self._replaygain)
+        self.player.next_provider = self._provide_next
 
         self.playlist = []
         self.current_index = -1
@@ -3214,6 +3917,21 @@ class App:
         # actually playing.
         self._bg_anim_paused = True
 
+        # Gapless: index of the track handed to the player as "next".
+        self._queued_next = None
+        # Resume: position to continue from when ▶ is pressed after start.
+        self._resume_pos = 0.0
+        # Playlist type-to-search overlay (created on demand).
+        self._search_entry = None
+        self._search_var = None
+        self._search_timer = None
+        # Mini mode
+        self._mini = False
+        self._full_geometry = None
+        self._ui_pack_order = []
+        # Media keys (set up after the UI exists)
+        self._media_keys = None
+
         self._build_ui()
         self._video_win = VideoWindow(self.root, self)
         self._video_win.apply_palette(self.palette)
@@ -3222,7 +3940,7 @@ class App:
         try:
             self.root.attributes("-alpha", self._initial_alpha / 100.0)
         except Exception:
-            pass
+            _log_swallowed()
         self.root.after(120, self._apply_alpha_to_windows)
 
         if self._saved_playlist:
@@ -3269,26 +3987,32 @@ class App:
             self._sample_offered = True
             self._persist_settings()
 
+        self._restore_resume_point()
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<space>", lambda e: self.toggle_play())
         self.root.bind("<Left>",  lambda e: self.seek_by(-5))
         self.root.bind("<Right>", lambda e: self.seek_by(5))
         self.root.bind("<Up>",    lambda e: self.nudge_volume(+5))
         self.root.bind("<Down>",  lambda e: self.nudge_volume(-5))
+        # Letter shortcuts. While the mouse is over the playlist, typing
+        # starts the playlist search instead (see _shortcut).
         for k in ("m", "M"):
-            self.root.bind(k, lambda e: self.toggle_mute())
+            self.root.bind(k, self._shortcut(self.toggle_mute))
         for k in ("n", "N"):
-            self.root.bind(k, lambda e: self.next_track())
+            self.root.bind(k, self._shortcut(self.next_track))
         for k in ("p", "P"):
-            self.root.bind(k, lambda e: self.prev_track())
+            self.root.bind(k, self._shortcut(self.prev_track))
         for k in ("f", "F"):
-            self.root.bind(k, lambda e: self._toggle_video_fullscreen())
+            self.root.bind(k, self._shortcut(self._toggle_video_fullscreen))
         for k in ("c", "C"):
-            self.root.bind(k, lambda e: self.show_theme())
+            self.root.bind(k, self._shortcut(self.show_theme))
         for k in ("e", "E"):
-            self.root.bind(k, lambda e: self.show_equalizer())
+            self.root.bind(k, self._shortcut(self.show_equalizer))
+        self.root.bind("<Key>", self._on_root_key)
 
         self.root.after(80, self._initial_bg)
+        self.root.after(500, self._start_media_keys)
 
     # --- Playlist row formatting ----------------------------------------
     def _get_max_pl_chars(self):
@@ -3344,7 +4068,7 @@ class App:
             try:
                 self.root.after_cancel(self._pl_resize_job)
             except Exception:
-                pass
+                _log_swallowed()
         self._pl_resize_job = self.root.after(150, self._refresh_all_pl_lines)
 
     def _refresh_all_pl_lines(self):
@@ -3376,7 +4100,7 @@ class App:
             if was_selected:
                 self.listbox.selection_set(idx)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _probe_durations_async(self, paths):
         """
@@ -3402,7 +4126,7 @@ class App:
                             try:
                                 self.root.after(0, self._refresh_line_for, p)
                             except Exception:
-                                pass
+                                _log_swallowed()
                 except Exception as e:
                     print(f"[XZN] Duration probe failed for {p}: {e}")
             if new_any:
@@ -3411,7 +4135,7 @@ class App:
                 try:
                     self.root.after(0, self._persist_settings)
                 except Exception:
-                    pass
+                    _log_swallowed()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3474,7 +4198,14 @@ class App:
             "eq_preamp": float(self._eq_preamp),
             "sample_offered": bool(getattr(self, "_sample_offered", False)),
             "track_durations": dict(getattr(self, "_track_durations", {}) or {}),
+            "replaygain": bool(getattr(self, "_replaygain", True)),
+            "resume": self._resume_state(),
         })
+
+    def set_replaygain(self, en):
+        self._replaygain = bool(en)
+        self.player.set_replaygain(self._replaygain)
+        self._persist_settings()
 
     def set_eq_enabled(self, en):
         self._eq_enabled = bool(en)
@@ -3496,7 +4227,7 @@ class App:
         try:
             self.root.attributes("-alpha", a)
         except Exception:
-            pass
+            _log_swallowed()
 
         # Video window must always stay fully opaque
         video_win = None
@@ -3526,7 +4257,7 @@ class App:
                     # Recurse regardless, so nested toplevels are found
                     _collect(child)
             except Exception:
-                pass
+                _log_swallowed()
 
         _collect(self.root)
 
@@ -3536,7 +4267,7 @@ class App:
                 if w.winfo_exists() and w not in all_toplevels:
                     all_toplevels.append(w)
             except Exception:
-                pass
+                _log_swallowed()
 
         for w in all_toplevels:
             if video_win is not None and w is video_win:
@@ -3547,20 +4278,20 @@ class App:
                 if w.winfo_exists():
                     w.attributes("-alpha", a)
             except Exception:
-                pass
+                _log_swallowed()
 
         # Video window always fully opaque
         if video_win is not None:
             try:
                 video_win.attributes("-alpha", 1.0)
             except Exception:
-                pass
+                _log_swallowed()
 
         if bg_popup_win is not None:
             try:
                 bg_popup_win.attributes("-alpha", 1.0)
             except Exception:
-                pass
+                _log_swallowed()
 
     def _setup_dnd(self):
         if not _DND_AVAILABLE or DND_FILES is None:
@@ -3671,7 +4402,7 @@ class App:
             try:
                 self._main_frame.destroy()
             except Exception:
-                pass
+                _log_swallowed()
             self._main_frame = None
             self._dnd_widgets = []
 
@@ -3694,7 +4425,7 @@ class App:
             self.bal_scale.set(state_keep["bal"])
             self.alpha_scale.set(state_keep["alpha"])
         except Exception:
-            pass
+            _log_swallowed()
 
         if self.shuffle:
             self.btn_shuf.config(fg=self.palette["ACCENT"], relief="sunken")
@@ -3707,6 +4438,9 @@ class App:
 
         if self._video_win is not None and self._video_win.is_alive():
             self._video_win.apply_palette(self.palette)
+
+        if self._mini:
+            self._set_mini(True, resize=False)
 
         self._hero_size = (0, 0)
         self.root.after(40, self._render_bg)
@@ -3747,7 +4481,7 @@ class App:
         try:
             self.listbox.yview_moveto(float(v))
         except Exception:
-            pass
+            _log_swallowed()
 
     def _sync_pl_scrollbar(self, *args):
         try:
@@ -3757,7 +4491,7 @@ class App:
             else:
                 self.pl_scale.set(first)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _build_ui(self):
         p = self.palette
@@ -3769,6 +4503,7 @@ class App:
         hdr = tk.Frame(self._main_frame, bg=p["PANEL"], height=44)
         hdr.pack(fill="x", padx=8, pady=(8, 4))
         hdr.pack_propagate(False)
+        self._ui_hdr = hdr
 
         self._mkbtn(hdr, "INFO", self.show_info, w=6).pack(side="left", padx=(10, 0))
         self._mkbtn(hdr, "C", self.show_theme, w=3).pack(side="left", padx=(4, 0))
@@ -3795,9 +4530,17 @@ class App:
         self.hero = tk.Canvas(self._main_frame, height=200, bg=p["PANEL"], highlightthickness=0)
         self.hero.pack(fill="both", expand=False, padx=8, pady=(0, 6))
         self.hero.bind("<Configure>", self._on_hero_configure)
+        # Clicking the XZN wordmark switches to the mini player.
+        self.hero.bind("<Button-1>", self._on_hero_click)
+        self.hero.bind("<Motion>", self._on_hero_motion)
 
         mrow = tk.Frame(self._main_frame, bg=p["PANEL"])
         mrow.pack(fill="x", padx=8, pady=(0, 3))
+        # Wordmark shown only in mini mode; clicking it restores the
+        # full player (the hero canvas with the big wordmark is hidden).
+        self.mini_logo = tk.Label(mrow, text="XZN", font=("Helvetica", 12, "bold"),
+                                  bg=p["PANEL"], fg=p["ACCENT"], cursor="hand2")
+        self.mini_logo.bind("<Button-1>", lambda e: self.toggle_mini())
         self.state_lbl = tk.Label(mrow, text="■", font=("Courier New", 12, "bold"),
                                   bg=p["SUNKEN"], fg=p["ACCENT"], width=3)
         self.state_lbl.pack(side="left", padx=(0, 6), ipady=2)
@@ -3807,6 +4550,8 @@ class App:
 
         trow = tk.Frame(self._main_frame, bg=p["PANEL"])
         trow.pack(fill="x", padx=8, pady=(0, 2))
+        self._ui_mrow = mrow
+        self._ui_trow = trow
         self.cur_lbl = tk.Label(trow, text="00:00", font=FONT_LG, bg=p["SUNKEN"], fg=p["ACCENT"])
         self.cur_lbl.pack(side="left")
         tk.Label(trow, text="/", font=FONT_LG, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
@@ -3815,6 +4560,7 @@ class App:
 
         brow = tk.Frame(self._main_frame, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 2))
+        self._ui_brow = brow
         self.btn_prev = self._mkbtn(brow, "|◀", self.prev_track)
         self.btn_prev.pack(side="left")
         self.btn_play = self._mkbtn(brow, "▶", self.toggle_play, w=5)
@@ -3843,6 +4589,7 @@ class App:
 
         vrow = tk.Frame(self._main_frame, bg=p["PANEL"])
         vrow.pack(fill="x", padx=8, pady=(0, 4))
+        self._ui_vrow = vrow
         tk.Label(vrow, text="VOL", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
         self.vol_scale = tk.Scale(vrow, from_=0, to=100, orient="horizontal", length=130,
                                   showvalue=False, command=self._on_vol_cmd, bg=p["PANEL"],
@@ -3875,6 +4622,7 @@ class App:
 
         plf = tk.Frame(self._main_frame, bg=p["PANEL"])
         plf.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self._ui_plf = plf
         top = tk.Frame(plf, bg=p["PANEL"])
         top.pack(fill="x")
         tk.Label(top, text="PLAYLIST", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
@@ -3883,6 +4631,8 @@ class App:
 
         lrow = tk.Frame(plf, bg=p["SUNKEN"])
         lrow.pack(fill="both", expand=True, pady=(2, 4))
+        self._ui_lrow = lrow
+        self._search_entry = None   # old one died with the old UI
         list_bg = darken(p["BG"], 0.65) if luminance(p["BG"]) < 0.5 else "#ffffff"
         select_bg = mix(p["PANEL"], p["ACCENT"], 0.35)
 
@@ -3925,6 +4675,198 @@ class App:
         self.status_left = tk.Label(srow, text="Ready — add files to begin.",
                                     font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"], anchor="w")
         self.status_left.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=4)
+        self._ui_srow = srow
+
+        # Remember the full layout so mini mode can restore it exactly.
+        self._ui_pack_order = []
+        for w in self._main_frame.pack_slaves():
+            info = dict(w.pack_info())
+            info.pop("in", None)
+            self._ui_pack_order.append((w, info))
+
+    # --- Mini mode -------------------------------------------------------
+    def _wordmark_hit(self, event):
+        try:
+            bb = self.hero.bbox("fg")
+        except Exception:
+            return False
+        return bool(bb) and bb[0] - 4 <= event.x <= bb[2] + 4 and bb[1] - 4 <= event.y <= bb[3] + 4
+
+    def _on_hero_click(self, event):
+        if self._wordmark_hit(event):
+            self.toggle_mini()
+
+    def _on_hero_motion(self, event):
+        try:
+            self.hero.config(cursor="hand2" if self._wordmark_hit(event) else "")
+        except Exception:
+            _log_swallowed()
+
+    def toggle_mini(self):
+        self._set_mini(not self._mini)
+
+    def _set_mini(self, on, resize=True):
+        """
+        Mini mode keeps only title, time, transport buttons and the seek
+        bar. Clicking the small XZN wordmark brings the full player back.
+        """
+        keep = {self._ui_mrow, self._ui_trow, self._ui_brow, self.seek}
+        if on:
+            if resize and not self._mini:
+                self._full_geometry = self.root.geometry()
+            for w, _ in self._ui_pack_order:
+                if w not in keep:
+                    w.pack_forget()
+            self.mini_logo.pack(side="left", padx=(2, 8), before=self.state_lbl)
+            self._mini = True
+            self.root.minsize(420, 1)
+            if resize:
+                self.root.update_idletasks()
+                h = self._main_frame.winfo_reqheight() + 6
+                w = max(420, min(self.root.winfo_width(), 640))
+                self.root.geometry(f"{w}x{h}")
+            self.root.resizable(True, False)
+        else:
+            self.mini_logo.pack_forget()
+            for w, _ in self._ui_pack_order:
+                w.pack_forget()
+            for w, info in self._ui_pack_order:
+                w.pack(**info)
+            self._mini = False
+            self.root.resizable(True, True)
+            self.root.minsize(640, 700)
+            if resize and self._full_geometry:
+                self.root.geometry(self._full_geometry)
+            self._hero_size = (0, 0)
+            self.root.after(40, self._render_bg)
+
+    # --- Playlist type-to-search -----------------------------------------
+    def _pointer_over_playlist(self):
+        try:
+            x, y = self.root.winfo_pointerxy()
+            w = self.root.winfo_containing(x, y)
+        except Exception:
+            return False
+        return w is not None and w in (self.listbox, getattr(self, "pl_scale", None))
+
+    def _shortcut(self, fn):
+        """Wrap a letter shortcut: over the playlist the key starts a
+        search instead of triggering the shortcut."""
+        def handler(event):
+            if not self._mini and self._pointer_over_playlist() and event.char:
+                self._open_search(event.char)
+                return "break"
+            fn()
+        return handler
+
+    def _on_root_key(self, event):
+        ch = event.char
+        if not ch or len(ch) != 1 or not ch.isprintable() or ch == " ":
+            return None
+        if event.state & 0x4:      # Control held: leave it alone
+            return None
+        if self._mini or not self._pointer_over_playlist():
+            return None
+        self._open_search(ch)
+        return "break"
+
+    def _open_search(self, first_char=""):
+        if not self.playlist:
+            return
+        p = self.palette
+        if self._search_entry is None or not self._search_entry.winfo_exists():
+            self._search_var = tk.StringVar()
+            e = tk.Entry(self._ui_lrow, textvariable=self._search_var,
+                         font=("Courier New", 10), bd=0, relief="flat",
+                         bg=p["RAISED"], fg=p["WHITE"], insertbackground=p["ACCENT"],
+                         highlightthickness=1, highlightbackground=p["ACCENT"],
+                         highlightcolor=p["ACCENT"])
+            # Without the toplevel tag, typed letters don't fire the
+            # root shortcuts (m = mute, n = next …).
+            e.bindtags((str(e), "Entry", "all"))
+            e.bind("<KeyRelease>", self._on_search_key)
+            e.bind("<Return>", self._search_play)
+            e.bind("<KP_Enter>", self._search_play)
+            e.bind("<Escape>", lambda ev: self._close_search())
+            e.bind("<Down>", lambda ev: self._search_step(+1))
+            e.bind("<Up>", lambda ev: self._search_step(-1))
+            e.bind("<FocusOut>", lambda ev: self._close_search())
+            self._search_entry = e
+        e = self._search_entry
+        e.place(relx=1.0, rely=1.0, anchor="se", x=-6, y=-6, width=240)
+        e.lift()
+        self._search_var.set(first_char)
+        e.icursor("end")
+        e.focus_set()
+        self._search_update(start=0)
+
+    def _search_matches(self):
+        q = (self._search_var.get() if self._search_var else "").lower().split()
+        if not q:
+            return []
+        out = []
+        for i, path in enumerate(self.playlist):
+            name = (self._display_names.get(path) or os.path.basename(path)).lower()
+            if all(t in name for t in q):
+                out.append(i)
+        return out
+
+    def _search_update(self, start=0, step=1):
+        matches = self._search_matches()
+        e = self._search_entry
+        if not matches:
+            e.config(fg=self.palette["ERR"])
+        else:
+            e.config(fg=self.palette["WHITE"])
+            n = len(self.playlist)
+            # First match at/after 'start' in the chosen direction.
+            order = [(start + k * step) % n for k in range(n)]
+            mset = set(matches)
+            hit = next(i for i in order if i in mset)
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(hit)
+            self.listbox.see(hit)
+        self._restart_search_timer()
+
+    def _on_search_key(self, event):
+        if event.keysym in ("Return", "KP_Enter", "Escape", "Up", "Down"):
+            return
+        self._search_update(start=0)
+
+    def _search_step(self, step):
+        sel = self.listbox.curselection()
+        cur = sel[0] if sel else 0
+        self._search_update(start=cur + step, step=step)
+        return "break"
+
+    def _search_play(self, event=None):
+        sel = self.listbox.curselection()
+        self._close_search()
+        if sel:
+            self.play_index(sel[0])
+        return "break"
+
+    def _restart_search_timer(self):
+        if self._search_timer is not None:
+            try:
+                self.root.after_cancel(self._search_timer)
+            except Exception:
+                _log_swallowed()
+        self._search_timer = self.root.after(8000, self._close_search)
+
+    def _close_search(self):
+        if self._search_timer is not None:
+            try:
+                self.root.after_cancel(self._search_timer)
+            except Exception:
+                _log_swallowed()
+            self._search_timer = None
+        e = self._search_entry
+        if e is not None and e.winfo_exists():
+            had_focus = (self.root.focus_get() is e)
+            e.place_forget()
+            if had_focus:
+                self.root.focus_set()
 
     def _on_list_mousewheel(self, event):
         try:
@@ -3937,7 +4879,7 @@ class App:
                 delta = -1 if event.delta > 0 else 1
             self.listbox.yview_scroll(delta, "units")
         except Exception:
-            pass
+            _log_swallowed()
         return "break"
 
     # --- Playlist right-click (tag editor) ------------------------------
@@ -3964,7 +4906,7 @@ class App:
                 self.listbox.selection_clear(0, "end")
                 self.listbox.selection_set(index)
             except Exception:
-                pass
+                _log_swallowed()
 
         path = self.playlist[index]
         can_edit = is_taggable_audio(path) and _MUTAGEN_AVAILABLE
@@ -3977,7 +4919,7 @@ class App:
         try:
             popup.attributes("-topmost", True)
         except Exception:
-            pass
+            _log_swallowed()
 
         inner = tk.Frame(popup, bg=p["RAISED"], bd=0, highlightthickness=0)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
@@ -4002,7 +4944,7 @@ class App:
                 try:
                     _popup.destroy()
                 except Exception:
-                    pass
+                    _log_swallowed()
                 self.open_tag_editor(_p)
 
             item.bind("<Button-1>", _open_editor)
@@ -4022,7 +4964,7 @@ class App:
             try:
                 popup.destroy()
             except Exception:
-                pass
+                _log_swallowed()
 
         popup.bind("<FocusOut>", _close_popup)
         popup.bind("<Escape>", _close_popup)
@@ -4032,7 +4974,7 @@ class App:
         try:
             popup.focus_set()
         except Exception:
-            pass
+            _log_swallowed()
 
     def open_tag_editor(self, path):
         """Open the tag editor for the given file path."""
@@ -4042,9 +4984,9 @@ class App:
                 try:
                     self._tag_win.win.destroy()
                 except Exception:
-                    pass
+                    _log_swallowed()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self._tag_win = TagEditorWindow(self.root, self, path)
         except Exception as e:
@@ -4072,7 +5014,7 @@ class App:
             elif t:
                 new_name = t
         except Exception:
-            pass
+            _log_swallowed()
 
         self._display_names[path] = new_name
         try:
@@ -4080,7 +5022,7 @@ class App:
             self.listbox.insert(idx, self._format_pl_line(path))
             self.listbox.selection_set(idx)
         except Exception:
-            pass
+            _log_swallowed()
 
         # If this is the currently playing file, update the title text too
         if self.current_index == idx:
@@ -4088,7 +5030,7 @@ class App:
                 if self.player.current_path == path:
                     self.player.title_text = new_name
             except Exception:
-                pass
+                _log_swallowed()
 
     # --- Playlist reorder -----------------------------------------------
     def move_up(self):
@@ -4152,7 +5094,7 @@ class App:
         try:
             self.listbox.see(new_sel[0] if direction < 0 else new_sel[-1])
         except Exception:
-            pass
+            _log_swallowed()
 
         self._persist_settings()
 
@@ -4195,7 +5137,7 @@ class App:
             try:
                 self.root.after_cancel(self._hero_resize_job)
             except Exception:
-                pass
+                _log_swallowed()
         self._hero_resize_job = self.root.after(60, self._render_bg)
 
     def _render_bg(self):
@@ -4324,7 +5266,7 @@ class App:
             try:
                 self.root.after_cancel(self._bg_anim_job)
             except Exception:
-                pass
+                _log_swallowed()
             self._bg_anim_job = None
         self._bg_frames_photo = None
         self._bg_frame_durations = None
@@ -4337,7 +5279,7 @@ class App:
             try:
                 self.root.after_cancel(self._bg_anim_job)
             except Exception:
-                pass
+                _log_swallowed()
             self._bg_anim_job = None
 
     def _resume_bg_animation(self):
@@ -4381,7 +5323,7 @@ class App:
             try:
                 self._bg_popup.close()
             except Exception:
-                pass
+                _log_swallowed()
             self._bg_popup = None
             return
         try:
@@ -4404,7 +5346,7 @@ class App:
             try:
                 popup.close()
             except Exception:
-                pass
+                _log_swallowed()
 
     def remove_bg(self):
         self._stop_bg_animation()
@@ -4414,7 +5356,7 @@ class App:
         try:
             self.hero.delete("all")
         except Exception:
-            pass
+            _log_swallowed()
         self._render_bg()
         self._persist_settings()
         msg = "Background removed." if had_bg else "No background set."
@@ -4456,7 +5398,7 @@ class App:
                 self._apply_alpha_to_windows()
                 return
         except Exception:
-            pass
+            _log_swallowed()
         self._eq_win = EqualizerWindow(self.root, self)
         self._apply_alpha_to_windows()
 
@@ -4555,13 +5497,14 @@ class App:
         if added and self.current_index < 0:
             self.play_index(0)
 
-    def play_index(self, i):
+    def play_index(self, i, start_pos=0.0):
         if not (0 <= i < len(self.playlist)):
             return
         self.current_index = i
+        self._resume_pos = 0.0
         path = self.playlist[i]
         self._refresh_selection()
-        self.player.open_file(path)
+        self.player.open_file(path, start_pos)
         self.status_left.config(text=f"Opening {os.path.basename(path)} …", fg=self.palette["GRAY"])
 
     def _play_selected(self):
@@ -4592,7 +5535,7 @@ class App:
             try:
                 self.player.stop()
             except Exception:
-                pass
+                _log_swallowed()
 
         self._update_pl_count()
         self._persist_settings()
@@ -4665,7 +5608,7 @@ class App:
         elif p.state == "paused":
             p.resume()
         elif 0 <= self.current_index < len(self.playlist):
-            self.play_index(self.current_index)
+            self.play_index(self.current_index, self._resume_pos)
 
     def stop_play(self):
         self.player.stop()
@@ -4677,7 +5620,72 @@ class App:
             if self._video_win is not None and self._video_win.is_alive():
                 self._video_win.hide()
         except Exception:
-            pass
+            _log_swallowed()
+
+    # --- Gapless / resume --------------------------------------------------
+    def _provide_next(self):
+        """
+        Called from the player thread shortly before the current track
+        ends. Returns the path of the track to append without a gap, or
+        None to end playback normally. Only reads app state; the actual
+        switch is reported back through the "advanced" event.
+        """
+        try:
+            if not self.playlist:
+                return None
+            if self.repeat_mode == 1 and 0 <= self.current_index < len(self.playlist):
+                i = self.current_index
+            else:
+                i = self._next_index()
+            if i is None or not (0 <= i < len(self.playlist)):
+                self._queued_next = None
+                return None
+            self._queued_next = i
+            return self.playlist[i]
+        except Exception as e:
+            print(f"[XZN] _provide_next failed: {e}")
+            return None
+
+    def _on_advanced(self, path):
+        """The player moved on to the next track without a gap."""
+        i = self._queued_next
+        if not (i is not None and 0 <= i < len(self.playlist) and self.playlist[i] == path):
+            i = self.playlist.index(path) if path in self.playlist else -1
+        self._queued_next = None
+        self.current_index = i
+        self._refresh_selection()
+
+    def _resume_state(self):
+        """What to save so the next start can continue here."""
+        p = self.player
+        if p.state in ("playing", "paused") and p.current_path:
+            return {"path": p.current_path, "pos": round(float(p.position()), 1)}
+        if 0 <= self.current_index < len(self.playlist):
+            return {"path": self.playlist[self.current_index],
+                    "pos": round(float(self._resume_pos), 1)}
+        return None
+
+    def _restore_resume_point(self):
+        """Select last session's track; ▶ continues at the saved position."""
+        res = self._saved_resume
+        if not res or res.get("path") not in self.playlist:
+            return
+        i = self.playlist.index(res["path"])
+        pos = float(res.get("pos") or 0.0)
+        dur = self._track_durations.get(res["path"]) or 0.0
+        if pos < 3.0 or (dur and pos > dur - 3.0):
+            pos = 0.0
+        self.current_index = i
+        self._resume_pos = pos
+        self._refresh_selection()
+        name = self._display_names.get(res["path"]) or os.path.basename(res["path"])
+        self.player.title_text = name
+        if dur:
+            self.dur_lbl.config(text=fmt_time(dur))
+        if pos > 0:
+            self.status_left.config(
+                text=f"Press ▶ to continue \"{name}\" at {fmt_time(pos)}.",
+                fg=self.palette["GRAY"])
 
     def _next_index(self):
         n = len(self.playlist)
@@ -4770,7 +5778,7 @@ class App:
                             "", self.player.title_text or ""
                         )
                 except Exception:
-                    pass
+                    _log_swallowed()
             self._apply_alpha_to_windows()
         except Exception as e:
             print(f"[XZN] _toggle_video_window failed: {e}")
@@ -4849,7 +5857,7 @@ class App:
             try:
                 self.root.after_cancel(self._seek_wheel_timer)
             except Exception:
-                pass
+                _log_swallowed()
         self._seek_wheel_timer = self.root.after(250, self._reset_seek_wheel_state)
 
         return "break"
@@ -4875,6 +5883,10 @@ class App:
                     self._on_state(payload)
                 elif kind == "ended":
                     self._on_ended()
+                elif kind == "advanced":
+                    self._on_advanced(payload)
+                elif kind == "mediakey":
+                    self._on_media_key(payload)
                 elif kind == "error":
                     self.status_left.config(text=f"Error: {payload}", fg=self.palette["ERR"])
         except queue.Empty:
@@ -4889,6 +5901,11 @@ class App:
     def _on_meta(self, m):
         p = self.palette
         dur = m.get("duration") or 0.0
+        cur_path = self.player.current_path
+        self._media_update(
+            title=m.get("title") or (self._display_names.get(cur_path)
+                                     or os.path.basename(cur_path or "")),
+            artist=m.get("artist") or "", length=dur, new_track=True)
         self.dur_lbl.config(text=fmt_time(dur))
         title = m.get("title")
         artist = m.get("artist")
@@ -4916,7 +5933,7 @@ class App:
                     self.listbox.insert(self.current_index, self._format_pl_line(path))
                     self.listbox.selection_set(self.current_index)
                 except Exception:
-                    pass
+                    _log_swallowed()
 
         parts = [m.get("format") or "media"]
         v, a = m.get("video"), m.get("audio")
@@ -4944,10 +5961,11 @@ class App:
                     "", self.player.title_text or ""
                 )
             except Exception:
-                pass
+                _log_swallowed()
             self._apply_alpha_to_windows()
 
     def _on_state(self, s):
+        self._media_update(status={"playing": "Playing", "paused": "Paused"}.get(s, "Stopped"))
         glyph = {"playing": "▶", "paused": "II"}.get(s, "■")
         self.state_lbl.config(text=glyph)
         self.btn_play.config(text="||" if s == "playing" else "▶")
@@ -4971,7 +5989,7 @@ class App:
                 if self._video_win is not None and self._video_win.is_alive():
                     self._video_win.hide()
             except Exception:
-                pass
+                _log_swallowed()
 
     def _on_ended(self):
         if self.repeat_mode == 1 and self.current_index >= 0:
@@ -4982,6 +6000,45 @@ class App:
             self.play_index(i)
         else:
             self.status_left.config(text="End of playlist.", fg=self.palette["GRAY"])
+
+    # --- Media keys ------------------------------------------------------
+    def _start_media_keys(self):
+        try:
+            if IS_WINDOWS and ctypes is not None:
+                self._media_keys = WindowsMediaKeys(self.events)
+            elif sys.platform.startswith("linux") and MprisMediaKeys.available():
+                self._media_keys = MprisMediaKeys(self.events, self.player.position)
+            else:
+                print("[XZN] Media keys not available on this system")
+                return
+            self._media_keys.start()
+        except Exception as e:
+            print(f"[XZN] Media keys setup failed: {e}")
+            self._media_keys = None
+
+    def _media_update(self, **kw):
+        if self._media_keys is not None:
+            try:
+                self._media_keys.update(**kw)
+            except Exception:
+                _log_swallowed()
+
+    def _on_media_key(self, action):
+        state = self.player.state
+        if action == "playpause":
+            self.toggle_play()
+        elif action == "play":
+            if state != "playing":
+                self.toggle_play()
+        elif action == "pause":
+            if state == "playing":
+                self.player.pause()
+        elif action == "stop":
+            self.stop_play()
+        elif action == "next":
+            self.next_track()
+        elif action == "prev":
+            self.prev_track()
 
     def _tick_fast(self):
         try:
@@ -5002,6 +6059,11 @@ class App:
             p = self.player
             pos = p.position()
             dur = p.duration or 0.0
+            if p.state == "idle" and self._resume_pos > 0 \
+                    and 0 <= self.current_index < len(self.playlist):
+                # Not started yet: show where ▶ will continue.
+                pos = self._resume_pos
+                dur = self._track_durations.get(self.playlist[self.current_index]) or 0.0
             # Don't fight the slider while the user is dragging it or
             # while a mouse-wheel seek burst is still active.
             if not self._seek_dragging and not self._seek_wheel_active:
@@ -5065,7 +6127,7 @@ class App:
                     v = float(band.max()) if len(band) else 0.0
                     h[i] = min(1.0, (v / self._auto_gain) ** 0.8)
             except Exception:
-                pass
+                _log_swallowed()
         c.delete("all")
         try:
             w = max(c.winfo_width(), 10)
@@ -5081,16 +6143,21 @@ class App:
 
     # --- Shutdown --------------------------------------------------------
     def on_close(self):
+        if self._media_keys is not None:
+            try:
+                self._media_keys.stop()
+            except Exception:
+                _log_swallowed()
         # Stop the background animation first — its after() callbacks
         # must not fire against a destroyed root.
         try:
             self._stop_bg_animation()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self._close_bg_popup()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self._persist_settings()
         except Exception as e:
@@ -5101,22 +6168,22 @@ class App:
                 self.player.stream.stop()
                 self.player.stream.close()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             if self._video_win is not None and self._video_win.is_alive():
                 self._video_win.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             if self._eq_win is not None and self._eq_win.win.winfo_exists():
                 self._eq_win.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             if self._tag_win is not None and self._tag_win.win.winfo_exists():
                 self._tag_win.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         self.root.destroy()
 
     def run(self):
@@ -5126,7 +6193,10 @@ class App:
 
 
 def main():
+    setup_logging(_get_app_data_dir())
     print(f"[XZN] Starting {APP_NAME} {VERSION}")
+    if LOG_PATH:
+        print(f"[XZN] Log file: {LOG_PATH}")
     print(f"[XZN] Python {sys.version}")
     print(f"[XZN] av={av.__version__}  numpy={np.__version__}")
     print(f"[XZN] Settings: {SETTINGS_PATH}")
@@ -5147,4 +6217,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
