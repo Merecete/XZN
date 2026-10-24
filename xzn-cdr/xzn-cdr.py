@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.0.2
+XZN-CDR v1.0.3
 ==============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -11,8 +11,12 @@ Features
 - Encodes to MP3, OGG, FLAC, or writes WAV directly
 - Bitrate selection for lossy formats (MP3, OGG)
 - STOP button: finished tracks stay on disk, current track is discarded
+- Looks the disc up on MusicBrainz (artist, album, track titles) and
+  names files "NN - Title" in an "Artist - Album" folder, fully tagged
+- Writes ReplayGain tags so Xenon-Zones can level the volume
 - Themed GUI matching Xenon-Zones (accent color, alpha, Info/Theme/License)
 - Auto-saves settings (~/.xzn_cdr_settings.json)
+- Writes a log file (xzn-cdr.log) to the Xenon-Zones app data directory
 
 Platform backends
 -----------------
@@ -62,10 +66,12 @@ import shutil
 import queue
 import wave
 import threading
+import time
 import subprocess
 import traceback
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from fractions import Fraction
 from typing import List, Optional, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -73,7 +79,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
@@ -82,6 +88,128 @@ TASKBAR_APP_ID = "com.katie.xzn.cdripper.1"
 
 IS_WINDOWS = (sys.platform == "win32")
 IS_MAC = (sys.platform == "darwin")
+
+
+# --- Log file ------------------------------------------------------------
+# Same approach as Xenon-Zones: everything printed (status lines,
+# ffmpeg errors, tracebacks) is mirrored into xzn-cdr.log, so problems
+# can be diagnosed in the windowed release builds without a console.
+LOG_MAX_BYTES = 1_000_000
+LOG_PATH = None
+_LOG_LOCK = threading.Lock()
+
+
+def _get_app_data_dir():
+    """Per-user data directory shared with Xenon-Zones."""
+    if IS_WINDOWS:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif IS_MAC:
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    app_dir = os.path.join(base, "Xenon-Zones")
+    try:
+        os.makedirs(app_dir, exist_ok=True)
+    except Exception as e:
+        print(f"[XZN-CDR] Could not create app data dir '{app_dir}': {e}")
+        return None
+    return app_dir
+
+
+class _LogTee:
+    """Writes to the original stream (if any) and to the log file,
+    prefixing each new line with a timestamp."""
+
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+        self._line_start = True
+        self.encoding = "utf-8"
+
+    def write(self, s):
+        if not s:
+            return 0
+        if self._stream is not None:
+            try:
+                self._stream.write(s)
+            except Exception:
+                pass
+        with _LOG_LOCK:
+            try:
+                out = []
+                for part in s.splitlines(keepends=True):
+                    if self._line_start:
+                        out.append(time.strftime("%Y-%m-%d %H:%M:%S  "))
+                    out.append(part)
+                    self._line_start = part.endswith("\n")
+                self._fh.write("".join(out))
+                self._fh.flush()
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for f in (self._stream, self._fh):
+            try:
+                if f is not None:
+                    f.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+def setup_logging(log_dir):
+    """Mirror stdout/stderr into <log_dir>/xzn-cdr.log (previous log kept
+    as xzn-cdr.log.1 once it grows beyond LOG_MAX_BYTES)."""
+    global LOG_PATH
+    if not log_dir:
+        return None
+    path = os.path.join(log_dir, "xzn-cdr.log")
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+        fh = open(path, "a", encoding="utf-8", errors="replace")
+    except Exception as e:
+        print(f"[XZN-CDR] Could not open log file '{path}': {e}")
+        return None
+    fh.write("\n")
+    sys.stdout = _LogTee(sys.stdout, fh)
+    sys.stderr = _LogTee(sys.stderr, fh)
+    LOG_PATH = path
+    return path
+
+
+_SWALLOWED_SEEN = set()
+
+
+def _log_swallowed():
+    """For 'except Exception:' blocks that deliberately ignore an error:
+    logs it once per code location."""
+    et, ev, tb = sys.exc_info()
+    if et is None or tb is None:
+        return
+    code = tb.tb_frame.f_code
+    key = (code.co_filename, tb.tb_lineno, et.__name__)
+    if key in _SWALLOWED_SEEN or len(_SWALLOWED_SEEN) > 500:
+        return
+    _SWALLOWED_SEEN.add(key)
+    msg = str(ev).strip().replace("\n", " ")[:200]
+    print(f"[XZN-CDR] (ignored) {et.__name__}: {msg} — in {code.co_name}(), line {tb.tb_lineno}")
+
+
+def open_with_system(path):
+    """Open a file or folder with the platform's default application."""
+    try:
+        if IS_WINDOWS:
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif IS_MAC:
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        print(f"[XZN-CDR] Could not open '{path}': {e}")
 IS_LINUX = not IS_WINDOWS and not IS_MAC
 
 # --- Windows taskbar App-ID ---------------------------------------------
@@ -265,7 +393,7 @@ def apply_window_icon(window):
             window.iconbitmap(icon_path)
             return
         except Exception:
-            pass
+            _log_swallowed()
     try:
         img = tk.PhotoImage(file=icon_path)
         window.tk.call("wm", "iconphoto", window._w, img)
@@ -534,22 +662,22 @@ def _kill_process(proc):
         if proc.stderr is not None:
             proc.stderr.close()
     except Exception:
-        pass
+        _log_swallowed()
     try:
         proc.terminate()
     except Exception:
-        pass
+        _log_swallowed()
     try:
         proc.wait(timeout=2)
     except Exception:
         try:
             proc.kill()
         except Exception:
-            pass
+            _log_swallowed()
         try:
             proc.wait(timeout=1)
         except Exception:
-            pass
+            _log_swallowed()
 
 
 def _safe_unlink(path):
@@ -557,7 +685,210 @@ def _safe_unlink(path):
         if path and os.path.isfile(path):
             os.remove(path)
     except Exception:
-        pass
+        _log_swallowed()
+
+
+# ========================================================================
+# CD info: MusicBrainz lookup, file names, tags, ReplayGain
+# ========================================================================
+# A disc is identified by its table of contents (TOC): the start sector
+# of every track plus the lead-out. From that, the MusicBrainz disc ID is
+# computed and looked up in the free MusicBrainz database, which returns
+# artist, album and track titles. Only the disc ID / TOC is sent.
+#
+# TOC format used throughout this file:
+#   {"first": 1, "last": 12, "offsets": {1: 0, 2: 18055, ...}, "leadout": 225422}
+# All sector numbers are LSNs (track 1 normally starts at 0); the 150
+# sector lead-in that MusicBrainz expects is added when building the ID.
+
+MB_LEAD_IN = 150
+MB_USER_AGENT = f"XZN-CDR/{VERSION} ( https://github.com/Merecete/XZN )"
+MB_URL = "https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc}&inc=recordings+artist-credits&fmt=json"
+
+
+def musicbrainz_disc_id(toc: dict) -> str:
+    """MusicBrainz disc ID (28 chars) for a TOC, per
+    https://musicbrainz.org/doc/Disc_ID_Calculation"""
+    import hashlib
+    import base64
+    first, last = toc["first"], toc["last"]
+    s = "%02X%02X%08X" % (first, last, toc["leadout"] + MB_LEAD_IN)
+    for n in range(1, 100):
+        off = toc["offsets"].get(n)
+        s += "%08X" % (off + MB_LEAD_IN if off is not None else 0)
+    digest = hashlib.sha1(s.encode("ascii")).digest()
+    return (base64.b64encode(digest).decode("ascii")
+            .replace("+", ".").replace("/", "_").replace("=", "-"))
+
+
+def musicbrainz_toc_param(toc: dict) -> str:
+    """'first+last+leadout+offset1+…' — lets MusicBrainz find the disc
+    by track lengths even when this exact disc ID isn't registered."""
+    parts = [toc["first"], toc["last"], toc["leadout"] + MB_LEAD_IN]
+    parts += [toc["offsets"][n] + MB_LEAD_IN
+              for n in range(toc["first"], toc["last"] + 1) if n in toc["offsets"]]
+    return "+".join(str(p) for p in parts)
+
+
+def _artist_credit(ac) -> str:
+    return "".join(f"{c.get('name', '')}{c.get('joinphrase', '')}"
+                   for c in (ac or []) if isinstance(c, dict)).strip()
+
+
+def _ssl_context():
+    """Certificates for HTTPS. Frozen builds (especially on macOS) may not
+    find the system store, so prefer certifi when it is bundled."""
+    import ssl
+    try:
+        import certifi  # type: ignore
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def parse_musicbrainz(data: dict, disc_id: str, n_tracks: int) -> Optional[dict]:
+    """Turn a MusicBrainz discid response into
+    {"artist", "album", "date", "disc", "tracks": {position: {"title", "artist"}}}."""
+    if not isinstance(data, dict):
+        return None
+
+    # Unregistered discs sometimes exist as a simple "CD stub".
+    if data.get("tracks") and data.get("title") and not data.get("releases"):
+        album_artist = data.get("artist") or ""
+        tracks = {}
+        for i, t in enumerate(data["tracks"], start=1):
+            tracks[i] = {"title": t.get("title") or "", "artist": t.get("artist") or album_artist}
+        return {"artist": album_artist, "album": data.get("title") or "",
+                "date": "", "disc": None, "tracks": tracks}
+
+    best = None
+    for rel in data.get("releases") or []:
+        media = rel.get("media") or []
+        for medium in media:
+            discs = [d.get("id") for d in medium.get("discs") or []]
+            score = 0
+            if disc_id in discs:
+                score += 2
+            if (medium.get("track-count") or len(medium.get("tracks") or [])) == n_tracks:
+                score += 1
+            if medium.get("tracks"):
+                score += 1
+            if best is None or score > best[0]:
+                best = (score, rel, medium, len(media))
+    if best is None:
+        return None
+    _, rel, medium, n_media = best
+
+    album_artist = _artist_credit(rel.get("artist-credit"))
+    tracks = {}
+    for t in medium.get("tracks") or []:
+        pos = t.get("position")
+        if not isinstance(pos, int):
+            continue
+        rec = t.get("recording") or {}
+        tracks[pos] = {
+            "title": t.get("title") or rec.get("title") or "",
+            "artist": (_artist_credit(t.get("artist-credit"))
+                       or _artist_credit(rec.get("artist-credit")) or album_artist),
+        }
+    disc = None
+    if n_media > 1 and isinstance(medium.get("position"), int):
+        disc = f"{medium['position']}/{n_media}"
+    return {"artist": album_artist, "album": rel.get("title") or "",
+            "date": (rel.get("date") or "")[:4], "disc": disc, "tracks": tracks}
+
+
+def lookup_cd_info(toc: dict, timeout: float = 12.0) -> Optional[dict]:
+    """Ask MusicBrainz about the disc. Returns parsed info, or None if the
+    disc is unknown or the lookup failed (no internet, timeout, …)."""
+    import urllib.request
+    import urllib.error
+    disc_id = musicbrainz_disc_id(toc)
+    url = MB_URL.format(disc_id=disc_id, toc=musicbrainz_toc_param(toc))
+    print(f"[XZN-CDR] MusicBrainz lookup: disc ID {disc_id}")
+    req = urllib.request.Request(url, headers={"User-Agent": MB_USER_AGENT,
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print("[XZN-CDR] MusicBrainz: disc not found")
+        else:
+            print(f"[XZN-CDR] MusicBrainz lookup failed: HTTP {e.code}")
+        return None
+    except Exception as e:
+        print(f"[XZN-CDR] MusicBrainz lookup failed: {e}")
+        return None
+    n_tracks = len(toc["offsets"])
+    info = parse_musicbrainz(data, disc_id, n_tracks)
+    if info:
+        print(f"[XZN-CDR] MusicBrainz: {info['artist']} – {info['album']} "
+              f"({len(info['tracks'])} titles)")
+    return info
+
+
+_BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename(name: str, max_len: int = 120) -> str:
+    """Make a string usable as a file/folder name on all platforms."""
+    name = _BAD_FILENAME_CHARS.sub("_", name or "").strip().rstrip(". ")
+    if len(name) > max_len:
+        name = name[:max_len].rstrip(". ")
+    return name or "_"
+
+
+def measure_replaygain(ffmpeg: str, path: str) -> Optional[Tuple[float, float]]:
+    """(track_gain_dB, track_peak) via FFmpeg's replaygain filter."""
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostats", "-i", path,
+             "-af", "replaygain", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            timeout=600, creationflags=0x08000000 if IS_WINDOWS else 0)
+    except Exception as e:
+        print(f"[XZN-CDR] ReplayGain measurement failed: {e}")
+        return None
+    g = re.search(r"track_gain\s*=\s*([-+]?\d+(?:\.\d+)?)\s*dB", proc.stderr or "")
+    pk = re.search(r"track_peak\s*=\s*(\d+(?:\.\d+)?)", proc.stderr or "")
+    if not g:
+        print("[XZN-CDR] ReplayGain: no result from ffmpeg")
+        return None
+    return float(g.group(1)), (float(pk.group(1)) if pk else 1.0)
+
+
+def finalize_track(ffmpeg: str, path: str, fmt: str, tags: dict) -> None:
+    """After ripping: measure ReplayGain (so Xenon-Zones can level the
+    volume) and write all tags in one lossless remux. Never raises;
+    on failure the ripped file simply stays untagged."""
+    tags = {k: str(v) for k, v in tags.items() if v not in (None, "")}
+    if fmt != "WAV":
+        rg = measure_replaygain(ffmpeg, path)
+        if rg:
+            tags["REPLAYGAIN_TRACK_GAIN"] = f"{rg[0]:+.2f} dB"
+            tags["REPLAYGAIN_TRACK_PEAK"] = f"{rg[1]:.6f}"
+    if not tags:
+        return
+    base, ext = os.path.splitext(path)
+    tmp = f"{base}.tagging{ext}"
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+           "-map", "0", "-c", "copy"]
+    for k, v in tags.items():
+        cmd += ["-metadata", f"{k}={v}"]
+    if fmt == "MP3":
+        cmd += ["-id3v2_version", "3"]   # best compatibility (Explorer, car radios)
+    cmd.append(tmp)
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                              text=True, timeout=300,
+                              creationflags=0x08000000 if IS_WINDOWS else 0)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "").strip()[-300:])
+        os.replace(tmp, path)
+    except Exception as e:
+        _safe_unlink(tmp)
+        print(f"[XZN-CDR] Tagging failed for {os.path.basename(path)}: {e}")
 
 
 # ========================================================================
@@ -575,6 +906,9 @@ class RipJob:
     eject: bool
     ffmpeg: Optional[str]
     cancel_event: Optional[threading.Event] = None
+    # MusicBrainz result (see lookup_cd_info) or None → track_XX names
+    info: Optional[dict] = None
+    first_track: int = 1
 
     def extension(self) -> str:
         return {
@@ -606,6 +940,10 @@ def encode_args_for_ffmpeg(ffmpeg: str, fmt: str, bitrate: str,
 
 class CDBackend:
     name = "abstract"
+    # Filled by list_tracks(): exact TOC for the MusicBrainz lookup (see
+    # "CD info" above) and each track's start time in seconds.
+    toc: Optional[dict] = None
+    starts: Optional[dict] = None
 
     def is_available(self) -> bool:
         return False
@@ -683,6 +1021,8 @@ class FFmpegBackend(CDBackend):
             )
 
         tracks: List[Tuple[int, float]] = []
+        offsets, starts = {}, {}
+        leadout = 0
         for idx, ch in enumerate(chapters):
             track_no = idx + 1
             try:
@@ -691,7 +1031,7 @@ class FFmpegBackend(CDBackend):
                 if m:
                     track_no = int(m.group(1))
             except Exception:
-                pass
+                _log_swallowed()
 
             try:
                 start = float(ch.get("start_time", 0.0))
@@ -699,9 +1039,24 @@ class FFmpegBackend(CDBackend):
             except Exception:
                 continue
 
+            # Exact positions: chapters carry integer start/end in their
+            # time base (samples), which converts losslessly to sectors.
+            try:
+                tb = Fraction(str(ch.get("time_base") or "1/1"))
+                start = float(int(ch["start"]) * tb)
+                end = float(int(ch["end"]) * tb)
+            except Exception:
+                _log_swallowed()
+
             dur = max(0.0, end - start)
             tracks.append((track_no, dur))
+            offsets[track_no] = int(round(start * CD_SECTORS_PER_SECOND))
+            starts[track_no] = start
+            leadout = max(leadout, int(round(end * CD_SECTORS_PER_SECOND)))
 
+        self.starts = starts
+        self.toc = ({"first": min(offsets), "last": max(offsets),
+                     "offsets": offsets, "leadout": leadout} if offsets else None)
         return tracks
 
     def rip_track(self, drive: str, track_no: int, out_path: str,
@@ -823,12 +1178,18 @@ class PyCdioBackend(CDBackend):
         cd = None
         try:
             cd = cdio.Device(source=drive)
-            toc = cd.get_toc()
+            # pycdio's Device exposes the TOC methods directly; keep the
+            # get_toc() path for wrappers that provide one.
+            toc = cd.get_toc() if hasattr(cd, "get_toc") else cd
             if not toc:
                 raise RuntimeError("No TOC available — disc may not be an audio CD.")
 
             first_track = toc.get_first_track()
             last_track = toc.get_last_track()
+            if hasattr(first_track, "track"):     # pycdio Track objects
+                first_track, last_track = first_track.track, last_track.track
+            offsets = {}
+            leadout = None
 
             for track_num in range(first_track, last_track + 1):
                 track = toc.get_track(track_num)
@@ -845,7 +1206,20 @@ class PyCdioBackend(CDBackend):
                 num_sectors = lsn_end - lsn_start + 1
                 duration_sec = num_sectors / float(CD_SECTORS_PER_SECOND)
                 tracks.append((track_num, duration_sec))
+                offsets[track_num] = lsn_start
+                leadout = lsn_end + 1
 
+            # Enhanced CDs: a data session follows the audio, separated by
+            # an 11400-sector gap that MusicBrainz excludes from the lead-out.
+            if offsets and max(offsets) < last_track:
+                try:
+                    data_lsn = toc.get_track(max(offsets) + 1).get_lsn()
+                    leadout = data_lsn - 11400
+                except Exception:
+                    _log_swallowed()
+            self.starts = {n: o / float(CD_SECTORS_PER_SECOND) for n, o in offsets.items()}
+            self.toc = ({"first": min(offsets), "last": max(offsets),
+                         "offsets": offsets, "leadout": leadout} if offsets else None)
             return tracks
         except Exception as e:
             raise RuntimeError(f"Failed to read CD TOC: {e}")
@@ -854,7 +1228,7 @@ class PyCdioBackend(CDBackend):
                 try:
                     cd.close()
                 except Exception:
-                    pass
+                    _log_swallowed()
 
     def _read_track_pcm(self, drive: str, track_num: int,
                         progress_callback=None,
@@ -911,7 +1285,7 @@ class PyCdioBackend(CDBackend):
                 try:
                     cd.close()
                 except Exception:
-                    pass
+                    _log_swallowed()
 
     @staticmethod
     def _write_wav(path: str, pcm_data: bytes) -> None:
@@ -992,7 +1366,7 @@ class PyCdioBackend(CDBackend):
                 if proc.stderr is not None:
                     err = "".join(proc.stderr.readlines())[-300:]
             except Exception:
-                pass
+                _log_swallowed()
             _safe_unlink(wav_path)
             raise RuntimeError(
                 f"ffmpeg failed for track {track_no}: {err.strip()}"
@@ -1060,8 +1434,23 @@ class CdParanoiaBackend(CDBackend):
 
         out = result.stdout or ""
         tracks: List[Tuple[int, float]] = []
+        offsets = {}
+        leadout = 0
+        # Standard cd-paranoia -Q layout:
+        #   "  1.    18055 [04:00.55]        0 [00:00.00]    no   no  2"
+        #   track.  length-in-sectors [mm:ss.ff]  begin-sector [..] …
+        sector_pattern = re.compile(r"^\s*(\d+)\.\s+(\d+)\s+\[[\d:.]+\]\s+(\d+)\s+\[")
         pattern = re.compile(r"^\s*(\d+)\.\s+(\d+):(\d+):(\d+)")
         for line in out.splitlines():
+            ms = sector_pattern.match(line)
+            if ms:
+                track_no, length, begin = (int(ms.group(1)), int(ms.group(2)),
+                                           int(ms.group(3)))
+                if length > 0:
+                    tracks.append((track_no, length / float(CD_SECTORS_PER_SECOND)))
+                    offsets[track_no] = begin
+                    leadout = max(leadout, begin + length)
+                continue
             m = pattern.match(line)
             if not m:
                 continue
@@ -1075,6 +1464,10 @@ class CdParanoiaBackend(CDBackend):
             dur = mm * 60 + ss + ff / 75.0
             if dur > 0:
                 tracks.append((track_no, dur))
+
+        self.toc = ({"first": min(offsets), "last": max(offsets),
+                     "offsets": offsets, "leadout": leadout} if offsets else None)
+        self.starts = {n: o / float(CD_SECTORS_PER_SECOND) for n, o in offsets.items()}
 
         if not tracks:
             if ("No CD" in out or "Unable to open" in out
@@ -1188,7 +1581,7 @@ class CdParanoiaBackend(CDBackend):
                 if enc.stderr is not None:
                     err = "".join(enc.stderr.readlines())[-300:]
             except Exception:
-                pass
+                _log_swallowed()
             _safe_unlink(wav_path)
             raise RuntimeError(
                 f"ffmpeg failed for track {track_no}: {err.strip()}"
@@ -1219,7 +1612,14 @@ def make_backend(ffmpeg: Optional[str], ffprobe: Optional[str]) -> CDBackend:
 
 
 def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
-    os.makedirs(job.outdir, exist_ok=True)
+    info = job.info
+    outdir = job.outdir
+    if info and (info.get("artist") or info.get("album")):
+        # One folder per album: "Artist - Album"
+        outdir = os.path.join(outdir, safe_filename(
+            f"{info.get('artist') or 'Unknown Artist'} - {info.get('album') or 'Unknown Album'}"))
+    os.makedirs(outdir, exist_ok=True)
+    n_disc_tracks = len(info["tracks"]) if info and info.get("tracks") else 0
 
     total = len(job.tracks)
     if total == 0:
@@ -1235,8 +1635,14 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
                 ui_queue.put(("stopped", f"Stopped after {ripped} track(s)."))
                 return
 
-            out_name = f"track_{track_no:02d}{job.extension()}"
-            out_path = os.path.join(job.outdir, out_name)
+            meta = {}
+            if info:
+                meta = (info.get("tracks") or {}).get(track_no - job.first_track + 1) or {}
+            if meta.get("title"):
+                out_name = f"{track_no:02d} - {safe_filename(meta['title'])}{job.extension()}"
+            else:
+                out_name = f"track_{track_no:02d}{job.extension()}"
+            out_path = os.path.join(outdir, out_name)
 
             label = f"Track {track_no:02d} ({idx}/{total})"
             ui_queue.put(("log", f"Ripping {label} …"))
@@ -1264,6 +1670,21 @@ def rip_worker(job: RipJob, backend: CDBackend, ui_queue: "queue.Queue"):
                 return
             except Exception as e:
                 raise RuntimeError(f"Failed to rip track {track_no}: {e}")
+
+            # Tags + ReplayGain (lossless remux of the finished file)
+            if job.ffmpeg:
+                ui_queue.put(("progress", 100, f"{label} – tagging"))
+                tags = {"track": f"{track_no}/{n_disc_tracks}" if n_disc_tracks else str(track_no)}
+                if info:
+                    tags.update({
+                        "title": meta.get("title"),
+                        "artist": meta.get("artist") or info.get("artist"),
+                        "album": info.get("album"),
+                        "album_artist": info.get("artist"),
+                        "date": info.get("date"),
+                        "disc": info.get("disc"),
+                    })
+                finalize_track(job.ffmpeg, out_path, job.fmt, tags)
 
             ripped += 1
             ui_queue.put(("progress", 100, label))
@@ -1312,13 +1733,13 @@ class FlatOptionMenu:
             try:
                 self.var.trace("w", lambda *a: self._update_text())
             except Exception:
-                pass
+                _log_swallowed()
 
     def _update_text(self):
         try:
             self.btn.config(text=self.var.get())
         except Exception:
-            pass
+            _log_swallowed()
 
     def grid(self, **kwargs):
         self.btn.grid(**kwargs)
@@ -1339,7 +1760,7 @@ class FlatOptionMenu:
         try:
             self._popup.attributes("-topmost", True)
         except Exception:
-            pass
+            _log_swallowed()
 
         inner = tk.Frame(self._popup, bg=p["RAISED"], bd=0, highlightthickness=0)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1362,7 +1783,7 @@ class FlatOptionMenu:
         try:
             self._popup.focus_set()
         except Exception:
-            pass
+            _log_swallowed()
 
         self._popup.bind("<FocusOut>", lambda e: self._close())
         self._popup.bind("<Escape>", lambda e: self._close())
@@ -1389,12 +1810,12 @@ class FlatOptionMenu:
         try:
             self.var.set(value)
         except Exception:
-            pass
+            _log_swallowed()
         if self.on_change is not None:
             try:
                 self.on_change(value)
             except Exception:
-                pass
+                _log_swallowed()
         self._close()
 
     def _close(self):
@@ -1403,11 +1824,11 @@ class FlatOptionMenu:
         try:
             self.btn.unbind_all("<Button-1>")
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self._popup.destroy()
         except Exception:
-            pass
+            _log_swallowed()
         self._popup = None
 
 
@@ -1425,7 +1846,7 @@ def show_license_window(parent, palette, app=None):
         try:
             app._attach_macos_menu(win)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _close():
         if app is not None:
@@ -1433,11 +1854,11 @@ def show_license_window(parent, palette, app=None):
                 if win in app._extra_alpha_windows:
                     app._extra_alpha_windows.remove(win)
             except Exception:
-                pass
+                _log_swallowed()
         try:
             win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
 
     win.protocol("WM_DELETE_WINDOW", _close)
 
@@ -1496,22 +1917,22 @@ def show_license_window(parent, palette, app=None):
         h = win.winfo_height()
         win.geometry(f"+{mx - w // 2}+{my - h // 2}")
     except Exception:
-        pass
+        _log_swallowed()
 
     if app is not None:
         try:
             app._extra_alpha_windows.append(win)
         except Exception:
-            pass
+            _log_swallowed()
         try:
             win.after(30, app._apply_alpha_to_windows)
         except Exception:
-            pass
+            _log_swallowed()
 
     try:
         win.focus_set()
     except Exception:
-        pass
+        _log_swallowed()
 
 
 class ThemeWindow:
@@ -1528,7 +1949,7 @@ class ThemeWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         p = app.palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=18, pady=16)
@@ -1576,18 +1997,18 @@ class ThemeWindow:
         try:
             app._extra_alpha_windows.append(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _close(self):
         try:
             if self.win in self.app._extra_alpha_windows:
                 self.app._extra_alpha_windows.remove(self.win)
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
 
     def _pick(self, color):
         self._close()
@@ -1611,7 +2032,7 @@ class InfoWindow:
         try:
             app._attach_macos_menu(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
         p = palette
         frame = tk.Frame(self.win, bg=p["PANEL"], padx=26, pady=22)
@@ -1678,6 +2099,14 @@ class InfoWindow:
             palette=p, padx=10, pady=4
         ).pack(side="left")
 
+        # Opens xzn-cdr.log, e.g. to attach it to a bug report.
+        if LOG_PATH:
+            make_flat_button(
+                btn_row, "Log",
+                lambda: open_with_system(LOG_PATH),
+                palette=p, padx=10, pady=4
+            ).pack(side="left", padx=(6, 0))
+
         make_flat_button(
             btn_row, "Close", self._close,
             palette=p, padx=14, pady=4
@@ -1696,18 +2125,18 @@ class InfoWindow:
         try:
             app._extra_alpha_windows.append(self.win)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _close(self):
         try:
             if self.win in self.app._extra_alpha_windows:
                 self.app._extra_alpha_windows.remove(self.win)
         except Exception:
-            pass
+            _log_swallowed()
         try:
             self.win.destroy()
         except Exception:
-            pass
+            _log_swallowed()
 
 
 class App:
@@ -1719,8 +2148,10 @@ class App:
         self._setup_macos_menu()
         self.root.title(APP_NAME)
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
+        # Start small; _fit_window() sets the final size once the
+        # widgets exist (smallest size the layout needs, at least 680x640).
         self.root.minsize(680, 640)
-        self.root.geometry("720x680")
+        self.root.geometry("680x640")
 
         settings = load_settings()
         self.accent = settings.get("accent") or DEFAULT_PALETTE["ACCENT"]
@@ -1733,6 +2164,9 @@ class App:
 
         self.cd_tracks: List[Tuple[int, float]] = []
         self.total_cd_time: float = 0.0
+        # MusicBrainz info for the scanned disc (None = unknown / pending)
+        self.cd_info: Optional[dict] = None
+        self._scan_token = 0
         self.ripping = False
         self.worker_thread: Optional[threading.Thread] = None
         self.ui_queue: "queue.Queue" = queue.Queue()
@@ -1756,17 +2190,31 @@ class App:
         self._extra_alpha_windows: List[tk.Toplevel] = []
 
         self._build_ui()
+        self._fit_window()
 
         try:
             self.root.attributes("-alpha", self._initial_alpha / 100.0)
         except Exception:
-            pass
+            _log_swallowed()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.bind("<Escape>", lambda e: self.on_close())
+        # (Esc no longer quits: in every other XZN window it only closes
+        # that window, so quitting the whole ripper by accident was easy.)
 
         self.root.after(100, self._poll_ui_queue)
         self.root.after(200, self._startup_check)
+
+    def _fit_window(self):
+        """Open at the smallest size the layout needs (never below the
+        classic 680x640 minimum)."""
+        try:
+            self.root.update_idletasks()
+            w = max(680, self._main_frame.winfo_reqwidth())
+            h = max(640, self._main_frame.winfo_reqheight())
+            self.root.minsize(w, h)
+            self.root.geometry(f"{w}x{h}")
+        except Exception:
+            _log_swallowed()
 
     def _setup_macos_menu(self):
         if not IS_MAC:
@@ -1774,10 +2222,15 @@ class App:
         try:
             self._mac_menubar = tk.Menu(self.root)
             self.root.config(menu=self._mac_menubar)
-            
-            self.root.createcommand(
-                "tk::mac::standardAboutPanel", self.show_info
-            )
+            # "About XZN-CDR" in the macOS app menu → our own Info window.
+            # Tk calls tkAboutDialog for that entry (older Tk versions use
+            # ::tk::mac::ShowAbout); overriding standardAboutPanel alone
+            # does not work, so register both names (same fix as in XZN).
+            for name in ("tkAboutDialog", "::tk::mac::ShowAbout"):
+                try:
+                    self.root.createcommand(name, self.show_info)
+                except tk.TclError:
+                    _log_swallowed()
         except Exception as e:
             self._mac_menubar = None
             print(f"[XZN-CDR] macOS menu setup failed: {e}")
@@ -1821,7 +2274,7 @@ class App:
         try:
             self.track_canvas.yview_moveto(float(v))
         except Exception:
-            pass
+            _log_swallowed()
 
     def _sync_track_scrollbar(self, *args):
         try:
@@ -1831,7 +2284,7 @@ class App:
             else:
                 self.track_scale.set(first)
         except Exception:
-            pass
+            _log_swallowed()
 
     def _build_ui(self):
         p = self.palette
@@ -1841,7 +2294,7 @@ class App:
             try:
                 self._main_frame.destroy()
             except Exception:
-                pass
+                _log_swallowed()
         self._main_frame = tk.Frame(self.root, bg=p["BG"])
         self._main_frame.pack(fill="both", expand=True)
         parent = self._main_frame
@@ -1982,6 +2435,11 @@ class App:
         self.track_count = tk.Label(top, text="", font=FONT_UI,
                                     bg=p["PANEL"], fg=p["ACCENT_LO"])
         self.track_count.pack(side="right")
+        # "Artist – Album (Year)" from MusicBrainz, shown after a scan.
+        # width=1 + fill: long names are cut instead of widening the window.
+        self.album_lbl = tk.Label(top, text="", font=FONT_UI_B, width=1,
+                                  bg=p["PANEL"], fg=p["ACCENT"], anchor="w")
+        self.album_lbl.pack(side="left", fill="x", expand=True, padx=(10, 10))
 
         lrow = tk.Frame(list_frame, bg=p["SUNKEN"])
         lrow.pack(fill="both", expand=True, pady=(2, 4))
@@ -2046,7 +2504,7 @@ class App:
                 delta = -1 if event.delta > 0 else 1
             self.track_canvas.yview_scroll(delta, "units")
         except Exception:
-            pass
+            _log_swallowed()
         return "break"
 
     def apply_accent(self, accent_hex):
@@ -2064,7 +2522,7 @@ class App:
             self.alpha_scale.set(int(a))
             self.root.attributes("-alpha", a / 100.0)
         except Exception:
-            pass
+            _log_swallowed()
 
         self._persist_settings()
         self._apply_alpha_to_windows()
@@ -2083,7 +2541,7 @@ class App:
         try:
             self.root.attributes("-alpha", a)
         except Exception:
-            pass
+            _log_swallowed()
 
         all_toplevels = []
 
@@ -2094,7 +2552,7 @@ class App:
                         all_toplevels.append(child)
                     _collect(child)
             except Exception:
-                pass
+                _log_swallowed()
 
         _collect(self.root)
 
@@ -2103,14 +2561,14 @@ class App:
                 if w.winfo_exists() and w not in all_toplevels:
                     all_toplevels.append(w)
             except Exception:
-                pass
+                _log_swallowed()
 
         for w in all_toplevels:
             try:
                 if w.winfo_exists():
                     w.attributes("-alpha", a)
             except Exception:
-                pass
+                _log_swallowed()
 
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
@@ -2183,11 +2641,25 @@ class App:
 
         self.cd_tracks = tracks
         self.total_cd_time = sum(d for _, d in tracks)
-        self.status.config(
-            text=f"Found {len(tracks)} track(s) — total {fmt_time(self.total_cd_time)}.",
-            fg=p["GRAY"])
+        self.cd_info = None
+        self._scan_token += 1
+        found = f"Found {len(tracks)} track(s) — total {fmt_time(self.total_cd_time)}."
         self._render_tracks()
         self._persist_settings()
+
+        # Look the disc up on MusicBrainz in the background.
+        toc = getattr(self.backend, "toc", None)
+        if toc and toc.get("offsets"):
+            self.status.config(text=f"{found} Looking up CD info …", fg=p["GRAY"])
+            token = self._scan_token
+
+            def lookup():
+                info = lookup_cd_info(toc)
+                self.ui_queue.put(("cdinfo", token, info))
+
+            threading.Thread(target=lookup, daemon=True).start()
+        else:
+            self.status.config(text=found, fg=p["GRAY"])
 
     def _render_tracks(self):
         p = self.palette
@@ -2208,12 +2680,12 @@ class App:
             try:
                 self.track_count.config(text="")
             except Exception:
-                pass
+                _log_swallowed()
             try:
                 self.track_canvas.yview_moveto(0.0)
                 self.track_scale.set(0)
             except Exception:
-                pass
+                _log_swallowed()
             return
 
         for idx, (track_no, dur) in enumerate(self.cd_tracks):
@@ -2237,9 +2709,13 @@ class App:
                                bg=p["SUNKEN"], fg=p["WHITE"], width=8, anchor="w")
             dur_lbl.pack(side="left")
 
-            desc_lbl = tk.Label(row, text="Audio Track", font=FONT_UI,
-                                bg=p["SUNKEN"], fg=p["GRAY"])
-            desc_lbl.pack(side="left", padx=(6, 0))
+            title, artist = self._track_title(track_no)
+            if title and artist and self.cd_info and artist != self.cd_info.get("artist"):
+                title = f"{title}  ·  {artist}"      # compilations: show the artist
+            desc_lbl = tk.Label(row, text=title or "Audio Track", font=FONT_UI,
+                                bg=p["SUNKEN"], fg=p["WHITE"] if title else p["GRAY"],
+                                anchor="w")
+            desc_lbl.pack(side="left", padx=(6, 0), fill="x", expand=True)
 
             labels = [num_lbl, dur_lbl, desc_lbl, cb]
             self._track_rows.append((row, labels, var))
@@ -2267,7 +2743,7 @@ class App:
                 try:
                     self.track_canvas.focus_set()
                 except Exception:
-                    pass
+                    _log_swallowed()
                 return "break"
 
             def _on_right_click(event, _idx=idx):
@@ -2292,12 +2768,13 @@ class App:
             self.track_canvas.configure(takefocus=1)
             self.track_canvas.bind("<space>", self._on_space_toggle)
         except Exception:
-            pass
+            _log_swallowed()
 
         try:
             self.track_count.config(text=f"{len(self.cd_tracks)} track(s)")
         except Exception:
-            pass
+            _log_swallowed()
+        self._update_album_label()
 
         self._apply_row_selection_colors()
 
@@ -2307,7 +2784,50 @@ class App:
             self.track_canvas.yview_moveto(0.0)
             self.track_scale.set(0)
         except Exception:
-            pass
+            _log_swallowed()
+
+    # --- CD info (MusicBrainz) -------------------------------------------
+    def _track_title(self, track_no):
+        """(title, artist) for a disc track, or ("", "") if unknown."""
+        if not self.cd_info:
+            return "", ""
+        toc = getattr(self.backend, "toc", None) or {}
+        pos = track_no - int(toc.get("first", 1)) + 1
+        t = (self.cd_info.get("tracks") or {}).get(pos) or {}
+        return t.get("title") or "", t.get("artist") or ""
+
+    def _update_album_label(self):
+        try:
+            info = self.cd_info
+            if info and (info.get("artist") or info.get("album")):
+                txt = f"{info.get('artist') or '?'} – {info.get('album') or '?'}"
+                if info.get("date"):
+                    txt += f" ({info['date']})"
+                if info.get("disc"):
+                    txt += f"  [CD {info['disc']}]"
+                self.album_lbl.config(text=txt)
+            else:
+                self.album_lbl.config(text="")
+        except Exception:
+            _log_swallowed()
+
+    def _on_cd_info(self, token, info):
+        if token != self._scan_token:
+            return                      # a newer scan has started
+        p = self.palette
+        self.cd_info = info
+        found = f"{len(self.cd_tracks)} track(s) — total {fmt_time(self.total_cd_time)}."
+        if info:
+            self.status.config(text=f"{found} CD info from MusicBrainz.", fg=p["GRAY"])
+        else:
+            self.status.config(
+                text=f"{found} No CD info found — files will be named track_XX.",
+                fg=p["GRAY"])
+        # Keep the user's check marks while swapping in the titles.
+        checks = [v.get() for v in self.track_checks]
+        self._render_tracks()
+        for v, c in zip(self.track_checks, checks):
+            v.set(c)
 
     def _on_space_toggle(self, event=None):
         """Keyboard shortcut: toggle checkboxes of the selected rows."""
@@ -2324,9 +2844,9 @@ class App:
                         try:
                             self.track_checks[i].set(target_state)
                         except Exception:
-                            pass
+                            _log_swallowed()
             except Exception:
-                pass
+                _log_swallowed()
 
     def _apply_row_selection_colors(self):
         """Repaint row backgrounds based on self._track_selected."""
@@ -2344,7 +2864,7 @@ class App:
                     else:
                         w.configure(bg=bg)
             except Exception:
-                pass
+                _log_swallowed()
 
     def _toggle_checks_for_selection(self):
         """
@@ -2372,7 +2892,7 @@ class App:
             try:
                 self.track_checks[i].set(target)
             except Exception:
-                pass
+                _log_swallowed()
 
     def pick_outdir(self):
         d = filedialog.askdirectory(title="Choose output folder",
@@ -2420,13 +2940,13 @@ class App:
 
     def rip_all(self):
         if not self.cd_tracks:
-            self.status.config(text="Scan a CD first.", fg=p["ERR"])
+            self.status.config(text="Scan a CD first.", fg=self.palette["ERR"])
             return
         self._start_rip(list(self.cd_tracks))
 
     def rip_selected(self):
         if not self.cd_tracks:
-            self.status.config(text="Scan a CD first.", fg=p["ERR"])
+            self.status.config(text="Scan a CD first.", fg=self.palette["ERR"])
             return
         selected = [t for t, var in zip(self.cd_tracks, self.track_checks) if var.get()]
         self._start_rip(selected)
@@ -2438,12 +2958,18 @@ class App:
         track_ids: List[int] = []
         durations: List[float] = []
         starts: List[float] = []
-        acc = 0.0
+        # Real start positions from the TOC. (Summing the durations of
+        # only the *selected* tracks put e.g. track 3 at 0:00 and ripped
+        # the wrong audio on Windows.)
+        toc_starts = getattr(self.backend, "starts", None) or {}
+        all_starts, acc = {}, 0.0
+        for track_no, dur in self.cd_tracks:
+            all_starts[track_no] = acc
+            acc += dur
         for track_no, dur in selected_tracks:
             track_ids.append(track_no)
             durations.append(dur)
-            starts.append(acc)
-            acc += dur
+            starts.append(toc_starts.get(track_no, all_starts.get(track_no, 0.0)))
 
         self._cancel_event = threading.Event()
 
@@ -2458,6 +2984,8 @@ class App:
             eject=bool(self.eject_var.get()),
             ffmpeg=self.ffmpeg,
             cancel_event=self._cancel_event,
+            info=self.cd_info,
+            first_track=int((getattr(self.backend, "toc", None) or {}).get("first", 1)),
         )
 
         self.ripping = True
@@ -2468,7 +2996,7 @@ class App:
         try:
             self.btn_cancel.config(text="STOP", relief="raised")
         except Exception:
-            pass
+            _log_swallowed()
 
         backend = self.backend
 
@@ -2521,6 +3049,8 @@ class App:
                     self._progress_value = percent
                     self._progress_label = label
                     self._draw_progress(percent)
+                elif kind == "cdinfo":
+                    self._on_cd_info(*rest)
                 elif kind == "done":
                     msg = rest[0]
                     self.status.config(text=msg, fg=self.palette["GRAY"])
@@ -2543,7 +3073,7 @@ class App:
         try:
             self.btn_cancel.config(text="STOP", relief="raised")
         except Exception:
-            pass
+            _log_swallowed()
 
     def on_close(self):
         if self.ripping:
@@ -2557,12 +3087,12 @@ class App:
                 if self._cancel_event is not None:
                     self._cancel_event.set()
             except Exception:
-                pass
+                _log_swallowed()
             try:
                 if self.worker_thread is not None:
                     self.worker_thread.join(timeout=3)
             except Exception:
-                pass
+                _log_swallowed()
         try:
             self._persist_settings()
         except Exception as e:
@@ -2570,11 +3100,14 @@ class App:
         try:
             self.root.destroy()
         except Exception:
-            pass
+            _log_swallowed()
 
 
 def main():
+    setup_logging(_get_app_data_dir())
     print(f"[XZN-CDR] Starting {APP_LONG_NAME} {VERSION}")
+    if LOG_PATH:
+        print(f"[XZN-CDR] Log file: {LOG_PATH}")
     print(f"[XZN-CDR] Python {sys.version}")
     print(f"[XZN-CDR] Platform: {sys.platform}")
     print(f"[XZN-CDR] Frozen: {hasattr(sys, '_MEIPASS')}")
@@ -2591,3 +3124,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
