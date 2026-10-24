@@ -2736,6 +2736,133 @@ class InfoWindow:
 
 
 # ------------------------------------------------------------------------
+# Keyboard & mouse reference (F1)
+# ------------------------------------------------------------------------
+SHORTCUTS = [
+    ("PLAYBACK", [
+        ("Space",       "Play / Pause"),
+        ("← / →",       "Seek 5 s back / forward"),
+        ("↑ / ↓",       "Volume up / down"),
+        ("M",           "Mute"),
+        ("N",           "Next track"),
+        ("P",           "Previous track (or restart the current one)"),
+        ("Media keys",  "Play/Pause, Next, Previous, Stop"),
+    ]),
+    ("WINDOWS", [
+        ("E",           "Equalizer"),
+        ("C",           "Color scheme"),
+        ("F",           "Video fullscreen on / off"),
+        ("Ctrl+W",      "Mini player on / off"),
+        ("Esc",         "Close window / leave fullscreen"),
+        ("F1",          "This overview"),
+    ]),
+    ("PLAYLIST", [
+        ("Type",        "Search (mouse over the playlist)"),
+        ("↑ / ↓",       "Previous / next search hit"),
+        ("Enter",       "Play search hit"),
+        ("Double-click", "Play track"),
+        ("Right-click", "Edit tags (also Ctrl+click)" if IS_MAC else "Edit tags"),
+        ("Shift+click", "Select a range"),
+        ("Drag & drop", "Add files and folders"),
+    ]),
+    ("MOUSE", [
+        ("Click XZN",   "Mini player on / off"),
+        ("Wheel",       "Fine steps on sliders, 5 s on the timeline"),
+        ("Double-click video", "Fullscreen"),
+        ("Right-click BG", "Remove background image"),
+    ]),
+]
+
+
+class ShortcutsWindow:
+    """Reference of all keys and mouse actions. Opened and closed with
+    F1 (or the Close button / Esc). Follows the color scheme and the
+    window alpha like every other XZN window."""
+
+    def __init__(self, master, app):
+        self.app = app
+        p = app.palette
+        self.win = tk.Toplevel(master)
+        self.win.title("Shortcuts – XZN")
+        self.win.configure(bg=p["PANEL"])
+        self.win.resizable(False, False)
+        self.win.transient(master)
+        apply_window_icon(self.win)
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            _log_swallowed()
+
+        frame = tk.Frame(self.win, bg=p["PANEL"], padx=22, pady=18)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text="KEYS & MOUSE", font=("Helvetica", 15, "bold"),
+                 bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
+        tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(8, 10))
+
+        # Two columns of sections so the window stays compact.
+        cols = tk.Frame(frame, bg=p["PANEL"])
+        cols.pack(fill="both", expand=True)
+        half = (len(SHORTCUTS) + 1) // 2
+        for ci, sections in enumerate((SHORTCUTS[:half], SHORTCUTS[half:])):
+            col = tk.Frame(cols, bg=p["PANEL"])
+            col.grid(row=0, column=ci, sticky="nw", padx=(0, 22) if ci == 0 else 0)
+            r = 0
+            for title, rows in sections:
+                tk.Label(col, text=title, font=("Courier New", 8, "bold"),
+                         bg=p["PANEL"], fg=p["CYAN"]).grid(
+                    row=r, column=0, columnspan=2, sticky="w", pady=(0 if r == 0 else 10, 3))
+                r += 1
+                for key, desc in rows:
+                    tk.Label(col, text=key, font=("Courier New", 9, "bold"),
+                             bg=p["SUNKEN"], fg=p["ACCENT"], padx=6, pady=1).grid(
+                        row=r, column=0, sticky="w", pady=1)
+                    tk.Label(col, text=desc, font=FONT_UI, bg=p["PANEL"],
+                             fg=p["WHITE"], anchor="w").grid(
+                        row=r, column=1, sticky="w", padx=(8, 0), pady=1)
+                    r += 1
+
+        tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(12, 10))
+        btn_row = tk.Frame(frame, bg=p["PANEL"])
+        btn_row.pack(fill="x")
+        tk.Label(btn_row, text="F1 or Esc closes this window.", font=FONT_UI,
+                 bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        make_flat_button(btn_row, "Close", self.close, palette=p,
+                         padx=14, pady=4).pack(side="right")
+
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.win.bind("<Escape>", lambda e: self.close())
+
+        self.win.update_idletasks()
+        mx = master.winfo_rootx() + master.winfo_width() // 2
+        my = master.winfo_rooty() + master.winfo_height() // 2
+        w = self.win.winfo_width()
+        h = self.win.winfo_height()
+        self.win.geometry(f"+{max(0, mx - w // 2)}+{max(0, my - h // 2)}")
+        try:
+            app._extra_alpha_windows.append(self.win)
+        except Exception:
+            _log_swallowed()
+
+    def is_alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except Exception:
+            return False
+
+    def close(self):
+        try:
+            if self.win in self.app._extra_alpha_windows:
+                self.app._extra_alpha_windows.remove(self.win)
+        except Exception:
+            _log_swallowed()
+        try:
+            self.win.destroy()
+        except Exception:
+            _log_swallowed()
+
+
+# ------------------------------------------------------------------------
 class ThemeWindow:
     def __init__(self, master, app):
         self.app = app
@@ -3836,8 +3963,11 @@ class App:
 
         self.root.title("XZN")
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
-        self.root.minsize(640, 700)
-        self.root.geometry("760x780")
+        # Start at the smallest size; _fit_full_window() refines it once
+        # the widgets exist.
+        self._full_minsize = (640, 700)
+        self.root.minsize(*self._full_minsize)
+        self.root.geometry("640x700")
 
         # Font used by the playlist for measuring dynamic column widths.
         # Created once so we don't recreate it on every resize.
@@ -3931,8 +4061,11 @@ class App:
         self._ui_pack_order = []
         # Media keys (set up after the UI exists)
         self._media_keys = None
+        # Key reference window (F1)
+        self._help_win = None
 
         self._build_ui()
+        self._fit_full_window()
         self._video_win = VideoWindow(self.root, self)
         self._video_win.apply_palette(self.palette)
         self._setup_dnd()
@@ -4010,6 +4143,12 @@ class App:
         for k in ("e", "E"):
             self.root.bind(k, self._shortcut(self.show_equalizer))
         self.root.bind("<Key>", self._on_root_key)
+        # Mini player, Winamp-style "windowshade" key. With Ctrl it also
+        # works while the mouse is over the playlist (no search there).
+        for k in ("<Control-w>", "<Control-W>"):
+            self.root.bind(k, lambda e: (self.toggle_mini(), "break")[1])
+        # F1 works from every XZN window (main, EQ, the help itself …).
+        self.root.bind_all("<F1>", self.toggle_shortcuts)
 
         self.root.after(80, self._initial_bg)
         self.root.after(500, self._start_media_keys)
@@ -4153,9 +4292,15 @@ class App:
         try:
             self._mac_menubar = tk.Menu(self.root)
             self.root.config(menu=self._mac_menubar)
-            self.root.createcommand(
-                "tk::mac::standardAboutPanel", self._show_mac_about
-            )
+            # "About Xenon-Zones" in the macOS app menu → our own Info
+            # window. Tk calls tkAboutDialog for that entry (older Tk
+            # versions use ::tk::mac::ShowAbout); overriding the built-in
+            # standardAboutPanel is not enough, so register both names.
+            for name in ("tkAboutDialog", "::tk::mac::ShowAbout"):
+                try:
+                    self.root.createcommand(name, self._show_mac_about)
+                except tk.TclError:
+                    _log_swallowed()
             print("[XZN] macOS menu customized.")
         except Exception as e:
             self._mac_menubar = None
@@ -4442,6 +4587,11 @@ class App:
         if self._mini:
             self._set_mini(True, resize=False)
 
+        # An open key reference follows the new color scheme.
+        if self._help_win is not None and self._help_win.is_alive():
+            self._help_win.close()
+            self._help_win = ShortcutsWindow(self.root, self)
+
         self._hero_size = (0, 0)
         self.root.after(40, self._render_bg)
         self.root.after(80, self._apply_alpha_to_windows)
@@ -4538,14 +4688,22 @@ class App:
         mrow.pack(fill="x", padx=8, pady=(0, 3))
         # Wordmark shown only in mini mode; clicking it restores the
         # full player (the hero canvas with the big wordmark is hidden).
-        self.mini_logo = tk.Label(mrow, text="XZN", font=("Helvetica", 12, "bold"),
-                                  bg=p["PANEL"], fg=p["ACCENT"], cursor="hand2")
+        # Drawn exactly like the big wordmark (white with dark outline,
+        # dark with light outline on light themes), just smaller.
+        mini_font = tkfont.Font(family="Helvetica", size=16, weight="bold")
+        self.mini_logo = tk.Canvas(mrow, bg=p["PANEL"], highlightthickness=0, bd=0,
+                                   width=mini_font.measure("XZN") + 8,
+                                   height=mini_font.metrics("linespace") + 4,
+                                   cursor="hand2")
+        self._draw_wordmark(self.mini_logo, 4, 2, mini_font, "logo")
         self.mini_logo.bind("<Button-1>", lambda e: self.toggle_mini())
         self.state_lbl = tk.Label(mrow, text="■", font=("Courier New", 12, "bold"),
                                   bg=p["SUNKEN"], fg=p["ACCENT"], width=3)
         self.state_lbl.pack(side="left", padx=(0, 6), ipady=2)
+        # width=1: the scrolling text must never widen the window; the
+        # label simply fills whatever space the row has.
         self.marquee = tk.Label(mrow, text="", font=FONT_LCD, bg=p["SUNKEN"],
-                                fg=p["CYAN"], anchor="w")
+                                fg=p["CYAN"], anchor="w", width=1)
         self.marquee.pack(side="left", fill="x", expand=True, ipady=3)
 
         trow = tk.Frame(self._main_frame, bg=p["PANEL"])
@@ -4557,6 +4715,20 @@ class App:
         tk.Label(trow, text="/", font=FONT_LG, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
         self.dur_lbl = tk.Label(trow, text="--:--", font=FONT_LG, bg=p["SUNKEN"], fg=p["ACCENT"])
         self.dur_lbl.pack(side="left")
+
+        # Volume slider for mini mode (the VOL row is hidden there).
+        # Same look as the big one; both stay in sync via _on_vol_cmd.
+        self._mini_vol_box = tk.Frame(trow, bg=p["PANEL"])
+        tk.Label(self._mini_vol_box, text="VOL", font=FONT_UI_B,
+                 bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        self.mini_vol_scale = tk.Scale(self._mini_vol_box, from_=0, to=100, orient="horizontal",
+                                       length=130, showvalue=False, command=self._on_vol_cmd,
+                                       bg=p["PANEL"], fg=p["ACCENT"], troughcolor=p["SUNKEN"],
+                                       highlightthickness=0, sliderrelief="flat")
+        self.mini_vol_scale.set(85)
+        self.mini_vol_scale.pack(side="left", padx=(4, 0))
+        _bind_scale_wheel(self.mini_vol_scale, self._on_vol_cmd,
+                          lo=0, hi=100, step=5, round_to=1.0)
 
         brow = tk.Frame(self._main_frame, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 2))
@@ -4576,9 +4748,11 @@ class App:
         self._mkbtn(brow, "VIDEO", self._toggle_video_window, w=6).pack(side="right", padx=(0, 6))
 
         self.seek = tk.Scale(self._main_frame, from_=0, to=1000, orient="horizontal",
-                             length=VIDEO_W, command=self._on_seek_cmd, bg=p["PANEL"],
+                             length=120, command=self._on_seek_cmd, bg=p["PANEL"],
                              fg=p["ACCENT"], troughcolor=p["SUNKEN"], highlightthickness=0,
                              sliderrelief="flat", showvalue=False)
+        # Small requested length: the bar stretches with the window anyway
+        # (fill="x"), and a large value would keep the mini player wide.
         self.seek.pack(fill="x", padx=8, pady=(2, 2))
         self.seek.bind("<Button-1>", lambda e: setattr(self, "_seek_dragging", True))
         self.seek.bind("<ButtonRelease-1>", self._on_seek_release)
@@ -4702,6 +4876,19 @@ class App:
         except Exception:
             _log_swallowed()
 
+    def _fit_full_window(self):
+        """Open the full player at the smallest size its layout needs
+        (never below the classic 640x700 minimum)."""
+        try:
+            self.root.update_idletasks()
+            w = max(640, self._main_frame.winfo_reqwidth())
+            h = max(700, self._main_frame.winfo_reqheight())
+            self._full_minsize = (w, h)
+            self.root.minsize(w, h)
+            self.root.geometry(f"{w}x{h}")
+        except Exception:
+            _log_swallowed()
+
     def toggle_mini(self):
         self._set_mini(not self._mini)
 
@@ -4717,24 +4904,28 @@ class App:
             for w, _ in self._ui_pack_order:
                 if w not in keep:
                     w.pack_forget()
-            self.mini_logo.pack(side="left", padx=(2, 8), before=self.state_lbl)
+            self.mini_logo.pack(side="left", padx=(0, 8), before=self.state_lbl)
+            self.mini_vol_scale.set(self.vol_scale.get())
+            self._mini_vol_box.pack(side="right", padx=(0, 2))
             self._mini = True
-            self.root.minsize(420, 1)
+            # Smallest size that still shows every control in full.
+            self.root.update_idletasks()
+            w = self._main_frame.winfo_reqwidth()
+            h = self._main_frame.winfo_reqheight()
+            self.root.minsize(w, h)
             if resize:
-                self.root.update_idletasks()
-                h = self._main_frame.winfo_reqheight() + 6
-                w = max(420, min(self.root.winfo_width(), 640))
                 self.root.geometry(f"{w}x{h}")
             self.root.resizable(True, False)
         else:
             self.mini_logo.pack_forget()
+            self._mini_vol_box.pack_forget()
             for w, _ in self._ui_pack_order:
                 w.pack_forget()
             for w, info in self._ui_pack_order:
                 w.pack(**info)
             self._mini = False
             self.root.resizable(True, True)
-            self.root.minsize(640, 700)
+            self.root.minsize(*self._full_minsize)
             if resize and self._full_geometry:
                 self.root.geometry(self._full_geometry)
             self._hero_size = (0, 0)
@@ -5295,23 +5486,23 @@ class App:
 
     def _draw_hero_overlay(self):
         c = self.hero
-        p = self.palette
         try:
-            w = max(c.winfo_width(), 10)
-            h = max(c.winfo_height(), 10)
+            if not c.winfo_exists():
+                return
         except Exception:
             return
         c.delete("fg")
+        self._draw_wordmark(c, 20, 22, ("Helvetica", 22, "bold"), "fg")
 
-        is_light_theme = luminance(p["BG"]) > 0.5
-        text = "XZN"
-        font = ("Helvetica", 22, "bold")
+    def _draw_wordmark(self, c, x, y, font, tags):
+        """The XZN wordmark: white with a dark outline, or dark with a
+        light outline on light themes. Used by the hero and mini mode."""
+        is_light_theme = luminance(self.palette["BG"]) > 0.5
         shadow = "#000000" if not is_light_theme else "#ffffff"
         main = "#ffffff" if not is_light_theme else "#1a1240"
-
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-2, 0), (2, 0), (0, -2), (0, 2)):
-            c.create_text(20 + dx, 22 + dy, text=text, font=font, fill=shadow, anchor="nw", tags="fg")
-        c.create_text(20, 22, text=text, font=font, fill=main, anchor="nw", tags="fg")
+            c.create_text(x + dx, y + dy, text="XZN", font=font, fill=shadow, anchor="nw", tags=tags)
+        c.create_text(x, y, text="XZN", font=font, fill=main, anchor="nw", tags=tags)
 
     # --- BG popup --------------------------------------------------------
     def _bg_menu(self):
@@ -5385,6 +5576,16 @@ class App:
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
         self._apply_alpha_to_windows()
+
+    def toggle_shortcuts(self, event=None):
+        """F1: open the key reference, or close it if it is open."""
+        if self._help_win is not None and self._help_win.is_alive():
+            self._help_win.close()
+            self._help_win = None
+        else:
+            self._help_win = ShortcutsWindow(self.root, self)
+            self._apply_alpha_to_windows()
+        return "break"
 
     def show_theme(self):
         ThemeWindow(self.root, self)
@@ -5868,6 +6069,14 @@ class App:
 
     def _on_vol_cmd(self, v):
         self.player.set_volume(float(v) / 100.0)
+        # Keep the big and the mini volume slider showing the same value.
+        try:
+            iv = int(round(float(v)))
+            for sc in (getattr(self, "vol_scale", None), getattr(self, "mini_vol_scale", None)):
+                if sc is not None and int(round(float(sc.get()))) != iv:
+                    sc.set(iv)
+        except Exception:
+            _log_swallowed()
 
     def _on_bal_cmd(self, v):
         self.player.set_balance((float(v) - 50.0) / 50.0)
