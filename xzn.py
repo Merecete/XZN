@@ -2843,6 +2843,13 @@ class ShortcutsWindow:
             app._extra_alpha_windows.append(self.win)
         except Exception:
             _log_swallowed()
+        # Take the keyboard focus right away, so Esc works without first
+        # clicking into the window (F1 works from anywhere anyway).
+        try:
+            self.win.lift()
+            self.win.focus_force()
+        except Exception:
+            _log_swallowed()
 
     def is_alive(self):
         try:
@@ -4149,6 +4156,9 @@ class App:
             self.root.bind(k, lambda e: (self.toggle_mini(), "break")[1])
         # F1 works from every XZN window (main, EQ, the help itself …).
         self.root.bind_all("<F1>", self.toggle_shortcuts)
+        # Esc in the main window closes an open key overview too, so both
+        # keys named in its footer work no matter which window has focus.
+        self.root.bind("<Escape>", self._close_shortcuts)
 
         self.root.after(80, self._initial_bg)
         self.root.after(500, self._start_media_keys)
@@ -5576,6 +5586,13 @@ class App:
     def show_info(self):
         InfoWindow(self.root, self.palette, self)
         self._apply_alpha_to_windows()
+
+    def _close_shortcuts(self, event=None):
+        if self._help_win is not None and self._help_win.is_alive():
+            self._help_win.close()
+            self._help_win = None
+            return "break"
+        return None
 
     def toggle_shortcuts(self, event=None):
         """F1: open the key reference, or close it if it is open."""
