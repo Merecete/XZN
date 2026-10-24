@@ -2149,9 +2149,9 @@ class App:
         self.root.title(APP_NAME)
         self.root.configure(bg=DEFAULT_PALETTE["BG"])
         # Start small; _fit_window() sets the final size once the
-        # widgets exist (smallest size the layout needs, at least 680x640).
-        self.root.minsize(680, 640)
-        self.root.geometry("680x640")
+        # widgets exist (the smallest size the layout needs).
+        self.root.minsize(520, 560)
+        self.root.geometry("560x600")
 
         settings = load_settings()
         self.accent = settings.get("accent") or DEFAULT_PALETTE["ACCENT"]
@@ -2205,12 +2205,12 @@ class App:
         self.root.after(200, self._startup_check)
 
     def _fit_window(self):
-        """Open at the smallest size the layout needs (never below the
-        classic 680x640 minimum)."""
+        """Open at the smallest size the layout needs: the widest control
+        row sets the width, nothing else."""
         try:
             self.root.update_idletasks()
-            w = max(680, self._main_frame.winfo_reqwidth())
-            h = max(640, self._main_frame.winfo_reqheight())
+            w = self._main_frame.winfo_reqwidth()
+            h = self._main_frame.winfo_reqheight()
             self.root.minsize(w, h)
             self.root.geometry(f"{w}x{h}")
         except Exception:
@@ -2419,9 +2419,10 @@ class App:
         od.pack(fill="x", padx=8, pady=(0, 4))
         tk.Label(od, text="Output", font=FONT_UI_B,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(side="left", padx=(10, 6))
+        # width=1: a long path is cut off instead of widening the window
         self.outdir_label = tk.Label(od, text=self.current_outdir or "(not set)",
                                      font=FONT_UI, bg=p["SUNKEN"], fg=p["WHITE"],
-                                     anchor="w", padx=6)
+                                     anchor="w", padx=6, width=1)
         self.outdir_label.pack(side="left", fill="x", expand=True, ipady=3)
         self._mkbtn(od, "…", self.pick_outdir, w=3).pack(side="right", padx=(4, 0))
 
@@ -2483,7 +2484,7 @@ class App:
         self.btn_open_out = self._mkbtn(brow, "OPEN FOLDER", self.open_outdir, w=12)
         self.btn_open_out.pack(side="right", padx=(4, 10))
 
-        self.status = tk.Label(parent, text="Ready.",
+        self.status = tk.Label(parent, text="Ready.", width=1,
                                font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"], anchor="w")
         self.status.pack(fill="x", side="bottom")
 
@@ -3124,4 +3125,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
