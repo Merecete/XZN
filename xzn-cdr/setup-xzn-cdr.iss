@@ -4,7 +4,7 @@
 
 #define MyAppShortName  "XZN-CDR"
 #define MyAppLongName   "Xenon-Zones CD Ripper"
-#define MyAppVersion    "1.0.2"
+#define MyAppVersion    "1.0.3"
 #define MyAppPublisher  "Merecete"
 #define MyAppURL        "https://example.com/xzn"
 #define MyAppExeName    "XZN-CDR.exe"
