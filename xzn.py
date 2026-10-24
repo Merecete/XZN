@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.2
+Xenon-Zones (XZN) v1.0.3
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -77,9 +77,19 @@ except Exception:
     MutagenFile = None  # type: ignore
     _MUTAGEN_AVAILABLE = False
 
+# --- Optional: fast EQ filtering ----------------------------------------
+# scipy's sosfilt runs the biquad cascade in C. Without scipy the
+# equalizer falls back to the (much slower) pure-Python loop.
+try:
+    from scipy.signal import sosfilt as _sosfilt  # type: ignore
+    _SCIPY_AVAILABLE = True
+except Exception:
+    _sosfilt = None  # type: ignore
+    _SCIPY_AVAILABLE = False
+
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -915,6 +925,10 @@ class Equalizer:
         self.coeffs = np.tile(np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64),
                               (self.n, 1))
         self.z = np.zeros((2, self.n, 4), dtype=np.float64)
+        # sosfilt layout: one row per section [b0, b1, b2, 1, a1, a2];
+        # state shape (sections, 2, channels) for a (frames, channels) block.
+        self.sos = np.zeros((self.n, 6), dtype=np.float64)
+        self.zi = np.zeros((self.n, 2, 2), dtype=np.float64)
         self._recompute()
 
     def set_gains(self, gains_db):
@@ -936,6 +950,7 @@ class Equalizer:
     def reset_state(self):
         with self.lock:
             self.z[:] = 0.0
+            self.zi[:] = 0.0
 
     def _recompute(self):
         fs = self.fs
@@ -957,6 +972,10 @@ class Equalizer:
             self.coeffs[i, 2] = b2 / a0
             self.coeffs[i, 3] = a1 / a0
             self.coeffs[i, 4] = a2 / a0
+        c = self.coeffs
+        self.sos[:, 0:3] = c[:, 0:3]
+        self.sos[:, 3] = 1.0
+        self.sos[:, 4:6] = c[:, 3:5]
 
     def process(self, block):
         with self.lock:
@@ -965,6 +984,12 @@ class Equalizer:
             pre = 10.0 ** (self.preamp / 20.0)
             if pre != 1.0:
                 block *= pre
+            if _SCIPY_AVAILABLE:
+                y, self.zi = _sosfilt(self.sos, block.astype(np.float64),
+                                      axis=0, zi=self.zi)
+                block[:] = y
+                np.clip(block, -1.0, 1.0, out=block)
+                return
             coef = self.coeffs
             z = self.z
             n = self.n
@@ -5122,3 +5147,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
