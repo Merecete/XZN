@@ -38,7 +38,7 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
-python XZN.py
+python xzn.py
 
 
 ## Linux/macOS:
@@ -49,4 +49,4 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-python3 XZN.py
+python3 xzn.py
