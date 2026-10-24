@@ -8,6 +8,12 @@ Xenon-Zones (XZN) is a fast, lightweight, and natively compiled media player for
 
 ![Equalizer and video](Screenshots/equalizer_video.png)
 
+![Miniplayer](Screenshots/miniplayer.png)
+
+![Equalizer and video](Screenshots/equalizer_video.png)
+
+Miniplayer.png
+
 ## Features
 
 - Audio + video playback (via PyAV / FFmpeg)
