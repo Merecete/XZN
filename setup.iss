@@ -3,7 +3,7 @@
 ; ==================================================================
 
 #define MyAppName       "XZN"
-#define MyAppVersion    "1.0.2"
+#define MyAppVersion    "1.0.3"
 #define MyAppPublisher  "Merecete"
 #define MyAppURL        "https://example.com/xzn"
 #define MyAppExeName    "XZN.exe"
