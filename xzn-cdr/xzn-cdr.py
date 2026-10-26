@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.0.3
+XZN-CDR v1.0.4
 ==============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -79,7 +79,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
