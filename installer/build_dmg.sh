@@ -4,7 +4,7 @@
 #  the app on the left, an "Applications" shortcut on the right —
 #  drag one onto the other to install.
 #    dist/XZN.app             -> release/XZN-<ver>-macOS-<arch>.dmg
-#    xzn-cdr/dist/XZN-CDR.app -> release/XZN-CDR-<ver>-macOS-<arch>.dmg
+#    dist/XZN-CDR.app         -> release/XZN-CDR-<ver>-macOS-<arch>.dmg
 #  Usage: sh installer/build_dmg.sh <xzn-version> [cdr-version]
 #  (normally called by build_unix.sh)
 # ======================================================================
@@ -76,7 +76,7 @@ APPLESCRIPT
 make_dmg "$ROOT/dist/XZN.app" "XZN $VER" \
     "$ROOT/release/XZN-$VER-macOS-$ARCH.dmg"
 
-make_dmg "$ROOT/xzn-cdr/dist/XZN-CDR.app" "XZN-CDR $CDR_VER" \
+make_dmg "$ROOT/dist/XZN-CDR.app" "XZN-CDR $CDR_VER" \
     "$ROOT/release/XZN-CDR-$CDR_VER-macOS-$ARCH.dmg" \
 "XZN-CDR needs two free command line tools from Homebrew (https://brew.sh):
 

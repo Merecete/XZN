@@ -6,7 +6,8 @@ rem
 rem  Needs:  Python 3.10+ (python.org), Inno Setup 6 (for the installers)
 rem  XZN-CDR: put a *full* ffmpeg build into xzn-cdr\ffmpeg\
 rem           (ffmpeg.exe + ffprobe.exe) so it gets bundled.
-rem  Output:  dist\XZN\, xzn-cdr\dist\XZN-CDR\, release\*_Setup_*.exe
+rem  Output:  dist\XZN\, dist\XZN-CDR\, release\*_Setup_*.exe
+rem  All build files (specs, Inno scripts) live in this installer\ folder.
 rem ======================================================================
 setlocal
 cd /d "%~dp0\.."
@@ -23,14 +24,12 @@ for /f "delims=" %%v in ('python installer\version.py xzn-cdr\xzn-cdr.py') do se
 echo.
 echo === Building XZN %VER% / XZN-CDR %CDR_VER% ===
 
-pyinstaller --noconfirm --clean xzn.spec || goto :fail
+pyinstaller --noconfirm --clean installer\xzn.spec || goto :fail
 
 if not exist xzn-cdr\ffmpeg\ffmpeg.exe (
     echo WARNING: xzn-cdr\ffmpeg\ffmpeg.exe not found - XZN-CDR will need ffmpeg on the PATH.
 )
-pushd xzn-cdr
-pyinstaller --noconfirm --clean xzn-cdr.spec || (popd & goto :fail)
-popd
+pyinstaller --noconfirm --clean installer\xzn-cdr.spec || goto :fail
 
 rem --- Inno Setup ------------------------------------------------------
 set ISCC=
@@ -43,14 +42,14 @@ if not defined ISCC (
     echo Install it from https://jrsoftware.org/isinfo.php and run this again.
     goto :done
 )
-%ISCC% /Q /DMyAppVersion=%VER% setup.iss || goto :fail
-%ISCC% /Q /DMyAppVersion=%CDR_VER% xzn-cdr\setup-xzn-cdr.iss || goto :fail
+%ISCC% /Q /DMyAppVersion=%VER% installer\xzn.iss || goto :fail
+%ISCC% /Q /DMyAppVersion=%CDR_VER% installer\xzn-cdr.iss || goto :fail
 
 :done
 echo.
 echo Done:
 echo   dist\XZN\XZN.exe
-echo   xzn-cdr\dist\XZN-CDR\XZN-CDR.exe
+echo   dist\XZN-CDR\XZN-CDR.exe
 if defined ISCC echo   release\  - setup programs
 exit /b 0
 

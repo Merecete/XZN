@@ -40,8 +40,8 @@ CDR_VER="$(python installer/version.py xzn-cdr/xzn-cdr.py)"
 echo
 echo "=== Building XZN $VER / XZN-CDR $CDR_VER ($OS) ==="
 
-pyinstaller --noconfirm --clean xzn.spec
-(cd xzn-cdr && pyinstaller --noconfirm --clean xzn-cdr.spec)
+pyinstaller --noconfirm --clean installer/xzn.spec
+pyinstaller --noconfirm --clean installer/xzn-cdr.spec
 
 if [ "$OS" = "Darwin" ]; then
     sh installer/build_dmg.sh "$VER" "$CDR_VER"
