@@ -29,6 +29,10 @@ Xenon-Zones (XZN) is a lightweight, cross-platform compiled media player for Win
 - Python 3.10+
 - FFmpeg libraries (bundled with the `av` wheel usually)
 
+## Download
+
+Ready-made installers for **Windows**, **Linux** (`.deb` / `.tar.gz`) and **macOS** are available on the [Releases](../../releases) page.
+
 ## Installation
 
 ```bash
