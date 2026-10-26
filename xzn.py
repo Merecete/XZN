@@ -2081,6 +2081,31 @@ class VideoWindow:
         self.canvas.bind("<Double-Button-1>", self.toggle_fullscreen)
         self.win.bind("<Escape>", lambda e: self.exit_fullscreen())
 
+        # --- Fullscreen controls (OSD) ----------------------------------
+        # In fullscreen, moving the mouse to the bottom edge shows a mini
+        # player inside the video window; it hides again after 5 s
+        # without mouse movement. Built lazily, rebuilt on theme change.
+        self._osd = None
+        self._osd_visible = False
+        self._osd_hide_job = None
+        self._osd_seek_dragging = False
+        self.win.bind("<Motion>", self._on_osd_motion, add="+")
+
+        # Player keys also work while the video window has the focus
+        # (in fullscreen the main window is out of reach).
+        if app is not None:
+            keys = {
+                "<space>": app.toggle_play,
+                "<Left>": lambda: app.seek_by(-5), "<Right>": lambda: app.seek_by(5),
+                "<Up>": lambda: app.nudge_volume(+5), "<Down>": lambda: app.nudge_volume(-5),
+                "m": app.toggle_mute, "M": app.toggle_mute,
+                "n": app.next_track, "N": app.next_track,
+                "p": app.prev_track, "P": app.prev_track,
+                "f": self.toggle_fullscreen, "F": self.toggle_fullscreen,
+            }
+            for seq, fn in keys.items():
+                self.win.bind(seq, lambda e, fn=fn: (fn(), "break")[1])
+
         # Redraw the idle card when the window is resized and no video
         # frame is currently shown. Otherwise the card stays tiny.
         self.canvas.bind("<Configure>", self._on_canvas_configure)
@@ -2210,6 +2235,158 @@ class VideoWindow:
             self.canvas.configure(bg=palette["SUNKEN"])
         except Exception:
             _log_swallowed()
+        # The fullscreen controls are rebuilt in the new colors on demand.
+        self._destroy_osd()
+
+    # --- Fullscreen controls (OSD) --------------------------------------
+    OSD_EDGE_PX = 110      # distance from the bottom edge that shows it
+    OSD_HIDE_MS = 5000     # hide after this long without mouse movement
+
+    def _build_osd(self):
+        """Mini-player style control bar, placed bottom-center over the
+        video. Mirrors the main window's state via refresh_osd()."""
+        app = self.app
+        p = app.palette
+        osd = tk.Frame(self.win, bg=p["PANEL"], bd=0,
+                       highlightthickness=1, highlightbackground=p["ACCENT_LO"])
+
+        mrow = tk.Frame(osd, bg=p["PANEL"])
+        mrow.pack(fill="x", padx=8, pady=(8, 3))
+        logo_font = tkfont.Font(family="Helvetica", size=16, weight="bold")
+        logo = tk.Canvas(mrow, bg=p["PANEL"], highlightthickness=0, bd=0,
+                         width=logo_font.measure("XZN") + 8,
+                         height=logo_font.metrics("linespace") + 4, cursor="hand2")
+        app._draw_wordmark(logo, 4, 2, logo_font, "logo")
+        # XZN = leave fullscreen (same as the double-click)
+        logo.bind("<Button-1>", lambda e: self.exit_fullscreen())
+        logo.pack(side="left", padx=(0, 8))
+        self._osd_state = tk.Label(mrow, text="■", font=("Courier New", 12, "bold"),
+                                   bg=p["SUNKEN"], fg=p["ACCENT"], width=3)
+        self._osd_state.pack(side="left", padx=(0, 6), ipady=2)
+        self._osd_marquee = tk.Label(mrow, text="", font=FONT_LCD, bg=p["SUNKEN"],
+                                     fg=p["CYAN"], anchor="w", width=1)
+        self._osd_marquee.pack(side="left", fill="x", expand=True, ipady=3)
+
+        trow = tk.Frame(osd, bg=p["PANEL"])
+        trow.pack(fill="x", padx=8, pady=(0, 2))
+        self._osd_cur = tk.Label(trow, text="00:00", font=FONT_LG, bg=p["SUNKEN"], fg=p["ACCENT"])
+        self._osd_cur.pack(side="left")
+        tk.Label(trow, text="/", font=FONT_LG, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        self._osd_dur = tk.Label(trow, text="--:--", font=FONT_LG, bg=p["SUNKEN"], fg=p["ACCENT"])
+        self._osd_dur.pack(side="left")
+        vbox = tk.Frame(trow, bg=p["PANEL"])
+        vbox.pack(side="right", padx=(0, 2))
+        tk.Label(vbox, text="VOL", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        self._osd_vol = tk.Scale(vbox, from_=0, to=100, orient="horizontal", length=130,
+                                 showvalue=False, command=app._on_vol_cmd,
+                                 bg=p["PANEL"], fg=p["ACCENT"], troughcolor=p["SUNKEN"],
+                                 highlightthickness=0, sliderrelief="flat")
+        self._osd_vol.set(app.vol_scale.get())
+        self._osd_vol.pack(side="left", padx=(4, 0))
+        _bind_scale_wheel(self._osd_vol, app._on_vol_cmd, lo=0, hi=100, step=5, round_to=1.0)
+
+        brow = tk.Frame(osd, bg=p["PANEL"])
+        brow.pack(fill="x", padx=8, pady=(0, 2))
+        app._mkbtn(brow, "|◀", app.prev_track).pack(side="left")
+        self._osd_play = app._mkbtn(brow, "▶", app.toggle_play, w=5)
+        self._osd_play.pack(side="left", padx=(2, 0))
+        app._mkbtn(brow, "■", self._osd_stop).pack(side="left", padx=(2, 0))
+        app._mkbtn(brow, "▶|", app.next_track).pack(side="left", padx=(2, 0))
+        self._osd_shuf = app._mkbtn(brow, "SHUF", app.toggle_shuffle, w=6)
+        self._osd_shuf.pack(side="right")
+        self._osd_rep = app._mkbtn(brow, "REP:OFF", app.cycle_repeat, w=9)
+        self._osd_rep.pack(side="right", padx=(0, 2))
+
+        self._osd_seek = tk.Scale(osd, from_=0, to=1000, orient="horizontal", length=120,
+                                  showvalue=False, bg=p["PANEL"], fg=p["ACCENT"],
+                                  troughcolor=p["SUNKEN"], highlightthickness=0,
+                                  sliderrelief="flat")
+        self._osd_seek.pack(fill="x", padx=8, pady=(2, 8))
+        self._osd_seek.bind("<Button-1>", lambda e: setattr(self, "_osd_seek_dragging", True))
+        self._osd_seek.bind("<ButtonRelease-1>", self._on_osd_seek_release)
+
+        self._osd = osd
+        self.refresh_osd()
+
+    def _destroy_osd(self):
+        self._cancel_osd_timer()
+        if self._osd is not None:
+            try:
+                self._osd.destroy()
+            except Exception:
+                _log_swallowed()
+        self._osd = None
+        self._osd_visible = False
+
+    def _osd_stop(self):
+        # Stopping hides the video window; leave fullscreen first so the
+        # window comes back in its normal size next time.
+        self.exit_fullscreen()
+        self.app.stop_play()
+
+    def _on_osd_seek_release(self, event=None):
+        self._osd_seek_dragging = False
+        p = self.app.player
+        if p.duration > 0:
+            p.seek(self._osd_seek.get() / 1000.0 * p.duration)
+
+    def refresh_osd(self):
+        """Copy the main window's state into the fullscreen controls."""
+        if self._osd is None:
+            return
+        app = self.app
+        try:
+            self._osd_state.config(text=app.state_lbl.cget("text"))
+            self._osd_marquee.config(text=app.marquee.cget("text"))
+            self._osd_cur.config(text=app.cur_lbl.cget("text"))
+            self._osd_dur.config(text=app.dur_lbl.cget("text"))
+            for src, dst in ((app.btn_play, self._osd_play),
+                             (app.btn_rep, self._osd_rep),
+                             (app.btn_shuf, self._osd_shuf)):
+                dst.config(text=src.cget("text"), fg=src.cget("fg"), relief=src.cget("relief"))
+            if not self._osd_seek_dragging:
+                self._osd_seek.set(app.seek.get())
+        except Exception:
+            _log_swallowed()
+
+    def _show_osd(self):
+        if self._osd is None:
+            self._build_osd()
+        if not self._osd_visible:
+            self.refresh_osd()
+            self._osd.place(relx=0.5, rely=1.0, anchor="s", y=-28)
+            self._osd.lift()
+            self._osd_visible = True
+
+    def _hide_osd(self):
+        self._cancel_osd_timer()
+        if self._osd is not None and self._osd_visible:
+            self._osd.place_forget()
+        self._osd_visible = False
+
+    def _cancel_osd_timer(self):
+        if self._osd_hide_job is not None:
+            try:
+                self.win.after_cancel(self._osd_hide_job)
+            except Exception:
+                _log_swallowed()
+            self._osd_hide_job = None
+
+    def _on_osd_motion(self, event=None):
+        if not self._fullscreen or self.app is None:
+            return
+        try:
+            y = self.win.winfo_pointery() - self.win.winfo_rooty()
+            h = self.win.winfo_height()
+        except Exception:
+            return
+        if not self._osd_visible:
+            if y < h - self.OSD_EDGE_PX:
+                return
+            self._show_osd()
+        # Every mouse movement while it is visible restarts the timer.
+        self._cancel_osd_timer()
+        self._osd_hide_job = self.win.after(self.OSD_HIDE_MS, self._hide_osd)
 
     def show(self):
         try:
@@ -2332,12 +2509,15 @@ class VideoWindow:
                 _log_swallowed()
             self.win.attributes("-fullscreen", True)
             self._fullscreen = True
+            # Keyboard focus to the video, so Space, arrows etc. work.
+            self.win.focus_force()
         except Exception:
             _log_swallowed()
 
     def exit_fullscreen(self):
         if not self._fullscreen:
             return
+        self._hide_osd()
         try:
             self.win.attributes("-fullscreen", False)
             self.win.geometry(self._normal_geometry)
@@ -2786,6 +2966,7 @@ SHORTCUTS = [
         ("Click XZN",   "Mini player on / off"),
         ("Wheel",       "Fine steps on sliders, 5 s on the timeline"),
         ("Double-click video", "Fullscreen"),
+        ("Bottom edge", "Controls in video fullscreen"),
         ("Right-click BG", "Remove background image"),
     ]),
 ]
@@ -6112,7 +6293,12 @@ class App:
         # Keep the big and the mini volume slider showing the same value.
         try:
             iv = int(round(float(v)))
-            for sc in (getattr(self, "vol_scale", None), getattr(self, "mini_vol_scale", None)):
+            osd_vol = None
+            vw = getattr(self, "_video_win", None)
+            if vw is not None and getattr(vw, "_osd", None) is not None:
+                osd_vol = vw._osd_vol
+            for sc in (getattr(self, "vol_scale", None), getattr(self, "mini_vol_scale", None),
+                       osd_vol):
                 if sc is not None and int(round(float(sc.get()))) != iv:
                     sc.set(iv)
         except Exception:
@@ -6329,6 +6515,9 @@ class App:
                 self.cur_lbl.config(text=fmt_time(pos))
                 self.seek.set(int(1000 * (pos / dur)) if dur > 0 else 0)
             self._poll_events()
+            vw = self._video_win
+            if vw is not None and vw._osd_visible:
+                vw.refresh_osd()
         except Exception as e:
             print(f"[XZN] tick_mid error: {e}")
             traceback.print_exc()
