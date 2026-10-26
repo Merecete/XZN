@@ -6,11 +6,18 @@ Usage:
     pyinstaller xzn-cdr.spec
 
 Output:
-    dist/XZN-CDR/XZN-CDR.exe
+    dist/XZN-CDR/XZN-CDR.exe   (Windows)
+    dist/XZN-CDR/XZN-CDR       (Linux)
+    dist/XZN-CDR.app           (macOS)
 """
 
 import os
+import re
+import sys
 from PyInstaller.utils.hooks import collect_all
+
+with open(os.path.join(SPECPATH, "xzn-cdr.py"), encoding="utf-8") as _f:
+    VERSION = re.search(r'^VERSION\s*=\s*"([^"]+)"', _f.read(), re.M).group(1)
 
 # --- Build switches ---------------------------------------------------
 DEBUG = os.environ.get("XZN_DEBUG", "0") == "1"
@@ -18,6 +25,7 @@ DEBUG = os.environ.get("XZN_DEBUG", "0") == "1"
 # --- Files and Folders to bundle --------------------------------------
 datas = [
     ("xzn.ico", "."),
+    ("xzn.png", "."),
     ("xzn-logo.png", "."),
 ]
 
@@ -28,7 +36,8 @@ else:
     print("[spec] WARNUNG: 'ffmpeg'-Ordner nicht gefunden. Der Build wird auf System-ffmpeg angewiesen sein.")
 
 binaries = []
-hiddenimports = []
+# certifi: CA certificates for the HTTPS MusicBrainz lookup
+hiddenimports = ["certifi"]
 
 # --- Packages with native binaries -----------------------------------
 # PIL (Pillow) → für das Logo im Info-Fenster
@@ -95,3 +104,21 @@ coll = COLLECT(
     upx=False,
     name="XZN-CDR",
 )
+
+# --- macOS app bundle -------------------------------------------------
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="XZN-CDR.app",
+        icon="xzn.icns",
+        bundle_identifier="com.merecete.xzn-cdr",
+        version=VERSION,
+        info_plist={
+            "CFBundleName": "XZN-CDR",
+            "CFBundleDisplayName": "Xenon-Zones CD Ripper",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "NSHighResolutionCapable": True,
+            "NSHumanReadableCopyright": "© 2026 Merecete. MIT License.",
+        },
+    )

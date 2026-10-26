@@ -4,7 +4,11 @@
 
 #define MyAppShortName  "XZN-CDR"
 #define MyAppLongName   "Xenon-Zones CD Ripper"
-#define MyAppVersion    "1.0.3"
+; Version: passed in by installer\build_windows.bat (/DMyAppVersion=...),
+; this value is only the fallback for building by hand.
+#ifndef MyAppVersion
+  #define MyAppVersion  "1.0.3"
+#endif
 #define MyAppPublisher  "Merecete"
 #define MyAppURL        "https://example.com/xzn"
 #define MyAppExeName    "XZN-CDR.exe"
@@ -28,7 +32,7 @@ DisableWelcomePage=no
 
 LicenseFile=LICENSE.txt
 
-OutputDir=installer
+OutputDir=..\release
 OutputBaseFilename={#MyAppShortName}_Setup_v{#MyAppVersion}
 
 SetupIconFile=xzn.ico
@@ -53,7 +57,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
     GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\*"; DestDir: "{app}"; \
+; PyInstaller onedir output (see the .spec file)
+Source: "dist\XZN-CDR\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
