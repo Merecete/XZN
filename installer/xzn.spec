@@ -153,7 +153,7 @@ if sys.platform == "darwin" and not ONEFILE:
         version=VERSION,
         info_plist={
             "CFBundleName": "XZN",
-            "CFBundleDisplayName": "Xenon-Zones",
+            "CFBundleDisplayName": "XZN",
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
