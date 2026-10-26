@@ -2083,7 +2083,7 @@ class VideoWindow:
 
         # --- Fullscreen controls (OSD) ----------------------------------
         # In fullscreen, moving the mouse to the bottom edge shows a mini
-        # player inside the video window; it hides again after 5 s
+        # player (bottom left) inside the video window; it hides again after 5 s
         # without mouse movement. Built lazily, rebuilt on theme change.
         self._osd = None
         self._osd_visible = False
@@ -2243,7 +2243,7 @@ class VideoWindow:
     OSD_HIDE_MS = 5000     # hide after this long without mouse movement
 
     def _build_osd(self):
-        """Mini-player style control bar, placed bottom-center over the
+        """Mini-player style control bar, placed bottom-left over the
         video. Mirrors the main window's state via refresh_osd()."""
         app = self.app
         p = app.palette
@@ -2354,7 +2354,7 @@ class VideoWindow:
             self._build_osd()
         if not self._osd_visible:
             self.refresh_osd()
-            self._osd.place(relx=0.5, rely=1.0, anchor="s", y=-28)
+            self._osd.place(relx=0.0, rely=1.0, anchor="sw", x=28, y=-28)
             self._osd.lift()
             self._osd_visible = True
 
