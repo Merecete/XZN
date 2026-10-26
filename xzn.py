@@ -1240,9 +1240,9 @@ class Player(threading.Thread):
         self.title_text = ""
         self.has_video = False
         self.video_size_native = (0, 0)
-        # False while the video window is hidden or minimized: frames are
-        # still decoded (the decoder needs them) but not converted or
-        # buffered, so audio keeps flowing and no CPU is wasted.
+        # Set to False to skip video frames entirely (decode only). The app
+        # keeps it True and drains the frame buffer itself, even while the
+        # video window is hidden, so the picture is ready instantly.
         self.video_visible = True
         self._paused_pos = 0.0
         self._head_t = 0.0
@@ -4512,6 +4512,12 @@ class App:
                     self.root.createcommand(name, self._show_mac_about)
                 except tk.TclError:
                     _log_swallowed()
+            # Files opened from Finder ("Open with XZN", drag onto the Dock
+            # icon) arrive as an Apple Event, not as command-line arguments.
+            try:
+                self.root.createcommand("::tk::mac::OpenDocument", self._mac_open_documents)
+            except tk.TclError:
+                _log_swallowed()
             print("[XZN] macOS menu customized.")
         except Exception as e:
             self._mac_menubar = None
@@ -4532,6 +4538,11 @@ class App:
             win.config(menu=mb)
         except Exception as e:
             print(f"[XZN] _attach_macos_menu failed: {e}")
+
+    def _mac_open_documents(self, *paths):
+        files = [p for p in paths if os.path.isfile(p)]
+        if files:
+            self.root.after(100, lambda: self.add_paths(files))
 
     def _show_mac_about(self):
         try:
@@ -6525,22 +6536,25 @@ class App:
 
     def _update_video(self):
         p = self.player
+        if p.state not in ("playing", "paused") or not p.has_video:
+            return
         visible = False
         try:
             visible = (self._video_win is not None and self._video_win.is_alive()
                        and self._video_win.win.state() == "normal")
         except Exception:
             visible = False
-        if p.video_visible != visible:
-            p.video_visible = visible
-            if not visible:
-                p.vbuf.clear()      # stale frames; new ones arrive on show
-        if not visible:
-            return
-        if p.state not in ("playing", "paused") or not p.has_video:
-            return
 
         now = p.position()
+        if not visible:
+            # Window closed, minimized or still opening: keep the frame
+            # buffer flowing (drop what is due) instead of discarding
+            # everything. The upcoming frames stay ready, so the picture
+            # appears the moment the window is (re)opened, and the
+            # decoder never stalls the audio.
+            p.vbuf.pop_due(now)
+            return
+
         buf_size = p.vbuf.size()
         item = p.vbuf.pop_due(now + 0.050) if buf_size >= 3 else p.vbuf.pop_due(now)
 
