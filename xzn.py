@@ -4045,7 +4045,7 @@ class MprisMediaKeys:
         if iface == self.ROOT_IF:
             return {
                 "CanQuit": ("b", False), "CanRaise": ("b", False),
-                "HasTrackList": ("b", False), "Identity": ("s", APP_NAME),
+                "HasTrackList": ("b", False), "Identity": ("s", "XZN"),
                 "SupportedUriSchemes": ("as", []), "SupportedMimeTypes": ("as", []),
             }
         if iface == self.PLAYER_IF:
