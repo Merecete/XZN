@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.3
+Xenon-Zones (XZN) v1.0.4
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -203,7 +203,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -1240,6 +1240,10 @@ class Player(threading.Thread):
         self.title_text = ""
         self.has_video = False
         self.video_size_native = (0, 0)
+        # False while the video window is hidden or minimized: frames are
+        # still decoded (the decoder needs them) but not converted or
+        # buffered, so audio keeps flowing and no CPU is wasted.
+        self.video_visible = True
         self._paused_pos = 0.0
         self._head_t = 0.0
         self._video_pts = 0.0
@@ -1801,7 +1805,10 @@ class Player(threading.Thread):
                     time.sleep(0.01)
                     continue
 
-                if has_video and self.vbuf.size() > 60:
+                # Throttle on the video buffer only while frames are being
+                # shown. With the window hidden nothing empties the buffer,
+                # so waiting here would starve the audio until it cut out.
+                if has_video and self.video_visible and self.vbuf.size() > 60:
                     time.sleep(0.003)
                     continue
 
@@ -1911,6 +1918,9 @@ class Player(threading.Thread):
         else:
             t = self._video_pts + 1.0 / fps
         if t < -0.5 or t < self._skip_until - 0.4:
+            return
+        if not self.video_visible:
+            self._video_pts = t
             return
 
         try:
@@ -2030,7 +2040,7 @@ class VideoWindow:
         self.win.configure(bg="#0a0812")
         self.win.geometry("960x540")
         self.win.minsize(240, 160)
-        self.win.protocol("WM_DELETE_WINDOW", self.hide)
+        self.win.protocol("WM_DELETE_WINDOW", self._user_close)
         self.win.withdraw()
 
         apply_window_icon(self.win)
@@ -2242,6 +2252,13 @@ class VideoWindow:
                 _log_swallowed()
         except Exception as e:
             print(f"[XZN] VideoWindow.show failed: {e}")
+
+    def _user_close(self):
+        """Closed via the window's X: stay hidden for the next videos too,
+        until the user opens it again (VIDEO button or F)."""
+        if self.app is not None:
+            self.app._video_user_hidden = True
+        self.hide()
 
     def hide(self):
         # Remember the position before withdrawing, so we can restore
@@ -4031,6 +4048,9 @@ class App:
         self._hero_size = (0, 0)
         self._hero_resize_job = None
         self._video_win = None
+        # True after the user closed/hid the video window: following
+        # videos then play audio-only until VIDEO (or F) shows it again.
+        self._video_user_hidden = False
         self._eq_win = None
         self._tag_win = None
         self._main_frame = None
@@ -5985,8 +6005,10 @@ class App:
                 self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
             if self._video_win.win.state() == "normal":
+                self._video_user_hidden = True
                 self._video_win.hide()
             else:
+                self._video_user_hidden = False
                 self._video_win.show()
                 # Make sure we show the idle card when there's no video
                 # to draw yet (e.g. audio-only track).
@@ -6006,6 +6028,7 @@ class App:
             if self._video_win is None or not self._video_win.is_alive():
                 self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
+            self._video_user_hidden = False
             self._video_win.show()
             self._video_win.toggle_fullscreen()
             self._apply_alpha_to_windows()
@@ -6176,6 +6199,13 @@ class App:
                 self._video_win = VideoWindow(self.root, self)
                 self._video_win.apply_palette(self.palette)
             try:
+                minimized = self._video_win.win.state() == "iconic"
+            except Exception:
+                minimized = False
+            if self._video_user_hidden or minimized:
+                # The user put the video away: keep listening without it.
+                return
+            try:
                 self._video_win.fit_to_video(v[1], v[2])
             except Exception as e:
                 print(f"[XZN] fit_to_video failed: {e}")
@@ -6212,7 +6242,10 @@ class App:
             self.cur_lbl.config(text="00:00")
             self.seek.set(0)
             try:
-                if self._video_win is not None and self._video_win.is_alive():
+                # A minimized video window stays minimized (instead of being
+                # withdrawn and popping up again with the next video).
+                if self._video_win is not None and self._video_win.is_alive() \
+                        and self._video_win.win.state() != "iconic":
                     self._video_win.hide()
             except Exception:
                 _log_swallowed()
@@ -6303,12 +6336,17 @@ class App:
 
     def _update_video(self):
         p = self.player
-        if self._video_win is None or not self._video_win.is_alive():
-            return
+        visible = False
         try:
-            if self._video_win.win.state() != "normal":
-                return
+            visible = (self._video_win is not None and self._video_win.is_alive()
+                       and self._video_win.win.state() == "normal")
         except Exception:
+            visible = False
+        if p.video_visible != visible:
+            p.video_visible = visible
+            if not visible:
+                p.vbuf.clear()      # stale frames; new ones arrive on show
+        if not visible:
             return
         if p.state not in ("playing", "paused") or not p.has_video:
             return
@@ -6443,3 +6481,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
