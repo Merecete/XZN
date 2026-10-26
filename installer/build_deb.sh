@@ -87,7 +87,7 @@ VIDEO_MIME="video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/web
 LIST_MIME="audio/x-mpegurl;application/vnd.apple.mpegurl;"
 
 make_deb xzn "$VER" "$ROOT/dist/XZN" XZN \
-    "Xenon-Zones (XZN)" "Streamlined media player with a cyberpunk look" \
+    "XZN" "Streamlined media player with a cyberpunk look" \
     "AudioVideo;Audio;Video;Player;" "libportaudio2" \
     "$AUDIO_MIME$VIDEO_MIME$LIST_MIME" \
     "Streamlined media player with a cyberpunk look
@@ -97,7 +97,7 @@ make_deb xzn "$VER" "$ROOT/dist/XZN" XZN \
 make_deb xzn-cdr "$CDR_VER" "$ROOT/dist/XZN-CDR" XZN-CDR \
     "XZN-CDR" "Rip audio CDs to MP3 / OGG / FLAC / WAV" \
     "AudioVideo;Audio;DiscBurning;" "ffmpeg" "" \
-    "Audio CD ripper for Xenon-Zones
+    "Audio CD ripper for XZN
  Rips audio CDs to MP3, OGG, FLAC or WAV, looks up artist, album and
- track titles on MusicBrainz and writes tags and ReplayGain."
+ track titles on MusicBrainz and writes tags and ReplayGain for XZN."
 
