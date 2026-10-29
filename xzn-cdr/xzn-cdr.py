@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XZN-CDR v1.0.4
+XZN-CDR v1.0.5
 ==============
 Companion tool for Xenon-Zones that rips audio CDs to MP3 / OGG / FLAC / WAV.
 
@@ -79,7 +79,7 @@ from PIL import Image, ImageTk
 
 APP_NAME = "XZN-CDR"
 APP_LONG_NAME = "Xenon-Zones CD Ripper"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_cdr_settings.json")
 
 ICON_FILENAME = "xzn.ico"
@@ -1833,6 +1833,18 @@ class FlatOptionMenu:
 
 
 def show_license_window(parent, palette, app=None):
+    # Only one license window: a second click on "License" closes it.
+    if app is not None:
+        old = getattr(app, "_license_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                if old in app._extra_alpha_windows:
+                    app._extra_alpha_windows.remove(old)
+                old.destroy()
+                app._license_win = None
+                return None
+        except Exception:
+            _log_swallowed()
     p = palette
     win = tk.Toplevel(parent)
     win.title("License – XZN-CDR")
@@ -1928,6 +1940,7 @@ def show_license_window(parent, palette, app=None):
             win.after(30, app._apply_alpha_to_windows)
         except Exception:
             _log_swallowed()
+        app._license_win = win
 
     try:
         win.focus_set()
@@ -2188,6 +2201,10 @@ class App:
         self._progress_value = 0.0
         self._progress_label = ""
         self._extra_alpha_windows: List[tk.Toplevel] = []
+        # Tool windows (one each; a second click closes them)
+        self._info_win = None
+        self._theme_win = None
+        self._license_win = None
 
         self._build_ui()
         self._fit_window()
@@ -2571,13 +2588,30 @@ class App:
             except Exception:
                 _log_swallowed()
 
-    def show_info(self):
-        InfoWindow(self.root, self.palette, self)
+    def _toggle_window(self, attr, opener):
+        """Open a tool window, or close it when it is already open
+        (same behaviour as the VIDEO button). Prevents duplicates."""
+        win = getattr(self, attr, None)
+        try:
+            if win is not None and win.winfo_exists():
+                try:
+                    if win in self._extra_alpha_windows:
+                        self._extra_alpha_windows.remove(win)
+                except Exception:
+                    _log_swallowed()
+                win.destroy()
+                setattr(self, attr, None)
+                return
+        except Exception:
+            _log_swallowed()
+        setattr(self, attr, opener())
         self._apply_alpha_to_windows()
 
+    def show_info(self):
+        self._toggle_window("_info_win", lambda: InfoWindow(self.root, self.palette, self).win)
+
     def show_theme(self):
-        ThemeWindow(self.root, self)
-        self._apply_alpha_to_windows()
+        self._toggle_window("_theme_win", lambda: ThemeWindow(self.root, self).win)
 
     def _persist_settings(self):
         state = {
