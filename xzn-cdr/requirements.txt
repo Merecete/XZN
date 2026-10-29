@@ -1,8 +1,0 @@
-# XZN-CDR dependencies
-#
-# pycdio is only needed on Linux. macOS uses cd-paranoia, and Windows
-# uses ffmpeg's built-in libcdio backend.
-pycdio>=2.1.0; sys_platform == "linux"
-Pillow
-# CA certificates for the MusicBrainz lookup (frozen builds, macOS)
-certifi
