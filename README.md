@@ -10,6 +10,8 @@ Xenon-Zones (XZN) is a lightweight, cross-platform compiled media player for Win
 
 ![Miniplayer](Screenshots/miniplayer.png)
 
+![CD and Color](Screenshots/cd&color.png)
+
 ![Key mapping](Screenshots/key_mapping.png)
 
 ## Features
