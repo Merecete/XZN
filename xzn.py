@@ -1395,12 +1395,30 @@ class Player(threading.Thread):
             elif cmd[0] == "quit":
                 break
 
+    @staticmethod
+    def _is_cover_art(s):
+        """Album art embedded in audio files (MP3/M4A/FLAC) shows up as a
+        one-frame 'video' stream; it must not open the video window."""
+        try:
+            disp = getattr(av.stream, "Disposition", None)
+            if disp is not None and (s.disposition & disp.attached_pic):
+                return True
+        except Exception:
+            _log_swallowed()
+        try:
+            name = (s.codec_context.name or "").lower()
+            if name in ("mjpeg", "png", "bmp", "gif", "webp", "tiff") and (s.frames or 0) <= 1:
+                return True
+        except Exception:
+            _log_swallowed()
+        return False
+
     def _pick_streams(self, cont):
         vstreams, astreams = [], []
         for s in cont.streams:
             try:
                 if s.type == "video" and s.codec_context is not None:
-                    if (s.width or 0) * (s.height or 0) > 64 * 64:
+                    if (s.width or 0) * (s.height or 0) > 64 * 64 and not self._is_cover_art(s):
                         vstreams.append(s)
                 elif s.type == "audio":
                     astreams.append(s)
@@ -6365,8 +6383,10 @@ class App:
     def _set_icon(self, btn, name, active=False):
         """Switch a button's icon; active = highlighted (accent color)."""
         try:
-            btn.config(image=self._icon(name, active), relief="sunken" if active else "raised")
+            img = self._icon(name, active)
+            btn.config(image=img, relief="sunken" if active else "raised")
             btn._xzn_icon = (name, active)
+            btn._xzn_img = img
         except Exception:
             _log_swallowed()
 
@@ -6381,12 +6401,21 @@ class App:
         # so Tk sizes it exactly like the text buttons next to it.
         extra = {}
         if icon:
-            extra = {"image": self._icon(icon), "compound": "center"}
-            text = " "
+            img = self._icon(icon)
+            if IS_MAC or not IS_WINDOWS:
+                # Label: image only (no text). The icon is 2 px smaller than
+                # the text line, pady=4 keeps the height of text buttons.
+                extra = {"image": img}
+                text = ""
+            else:
+                # tk.Button: a space as text with compound="center" makes
+                # Tk size it exactly like the text buttons.
+                extra = {"image": img, "compound": "center"}
+                text = " "
 
         if IS_MAC or not IS_WINDOWS:
             btn = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
-                           font=FONT_BTN, padx=10 if icon else 8, pady=3,
+                           font=FONT_BTN, padx=10 if icon else 8, pady=4 if icon else 3,
                            relief="raised", bd=1, cursor="hand2", **extra)
             btn.bind("<Button-1>", lambda e: cmd())
             btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
@@ -6403,6 +6432,10 @@ class App:
                             relief="raised", bd=1, font=FONT_BTN, takefocus=0, **extra)
         if icon:
             btn._xzn_icon = (icon, False)
+            btn._xzn_img = extra["image"]        # keep the image alive
+            # macOS: make sure the image is drawn once the button is mapped
+            btn.bind("<Map>", lambda e, b=btn: b.after_idle(
+                lambda: b.winfo_exists() and b.config(image=b._xzn_img)), add="+")
         if tip:
             Tooltip(btn, tip, p)
         return btn
