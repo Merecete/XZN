@@ -6373,7 +6373,11 @@ class App:
                 line = int(tkfont.Font(font=FONT_BTN).metrics("linespace"))
             except Exception:
                 line = 16
-            self._icon_size = max(12, min(24, line - 2))
+            # Inner height of a text button (line + 2 x pady 3); icons fill
+            # most of it, leaving a small margin.
+            self._btn_inner_h = line + 6
+            # (Windows keeps the size it already looked right with)
+            self._icon_size = max(12, min(24, line - 2)) if IS_WINDOWS else max(14, min(26, line))
         color = self.palette["ACCENT"] if active else self.palette["WHITE"]
         key = (name, color, self._icon_size)
         if key not in self._icon_cache:
@@ -6403,9 +6407,11 @@ class App:
         if icon:
             img = self._icon(icon)
             if IS_MAC or not IS_WINDOWS:
-                # Label: image only (no text). The icon is 2 px smaller than
-                # the text line, pady=4 keeps the height of text buttons.
-                extra = {"image": img}
+                # Label: image only (no text). Tk ignores padx/pady for image
+                # labels, so the size is set in pixels: same height as the
+                # text buttons, some room left and right of the icon.
+                extra = {"image": img, "width": self._icon_size + 20,
+                         "height": self._btn_inner_h}
                 text = ""
             else:
                 # tk.Button: a space as text with compound="center" makes
@@ -6415,7 +6421,7 @@ class App:
 
         if IS_MAC or not IS_WINDOWS:
             btn = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
-                           font=FONT_BTN, padx=10 if icon else 8, pady=4 if icon else 3,
+                           font=FONT_BTN, padx=0 if icon else 8, pady=0 if icon else 3,
                            relief="raised", bd=1, cursor="hand2", **extra)
             btn.bind("<Button-1>", lambda e: cmd())
             btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
