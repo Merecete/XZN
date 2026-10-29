@@ -4861,6 +4861,11 @@ class CdWindow:
                                   selectforeground=p["WHITE"], activestyle="none")
         self.listbox.pack(fill="both", expand=True, padx=1, pady=1)
         self.listbox.bind("<Double-Button-1>", lambda e: self.play())
+        for seq in ("<Control-a>", "<Control-A>", "<Command-a>"):
+            try:
+                self.listbox.bind(seq, lambda e: (self.listbox.selection_set(0, "end"), "break")[1])
+            except tk.TclError:
+                _log_swallowed()
 
         # --- Options ----------------------------------------------------
         opt = tk.Frame(frame, bg=p["PANEL"])
@@ -4892,8 +4897,8 @@ class CdWindow:
         brow = tk.Frame(frame, bg=p["PANEL"])
         brow.pack(fill="x")
         app._mkbtn(brow, "▶ PLAY", self.play, w=8).pack(side="left")
-        self.btn_rip = app._mkbtn(brow, "RIP", self.rip, w=6)
-        self.btn_rip.pack(side="left", padx=(4, 0))
+        app._mkbtn(brow, "RIP ALL", lambda: self.rip(selected_only=False), w=8).pack(side="left", padx=(4, 0))
+        app._mkbtn(brow, "RIP SELECTED", lambda: self.rip(selected_only=True), w=13).pack(side="left", padx=(4, 0))
         app._mkbtn(brow, "STOP", self.stop_rip, w=6).pack(side="left", padx=(4, 0))
         app._mkbtn(brow, "OPEN FOLDER", self.open_folder, w=12).pack(side="right")
 
@@ -4960,7 +4965,6 @@ class CdWindow:
             return
         for n in sorted(self.toc["offsets"]):
             self.listbox.insert("end", self._track_label(n))
-        self.listbox.selection_set(0, "end")
         info = self.info
         if info and (info.get("artist") or info.get("album")):
             txt = f"{info.get('artist') or '?'} – {info.get('album') or '?'}"
@@ -4974,8 +4978,7 @@ class CdWindow:
 
     def _selected_tracks(self):
         tracks = sorted(self.toc["offsets"]) if self.toc else []
-        sel = [tracks[i] for i in self.listbox.curselection() if i < len(tracks)]
-        return sel or tracks
+        return [tracks[i] for i in self.listbox.curselection() if i < len(tracks)]
 
     # --- scan / lookup ---------------------------------------------------
     def scan(self):
@@ -5038,10 +5041,15 @@ class CdWindow:
         self.app.play_cd_tracks(items)
         self._set_status(f"Playing the CD in XZN ({len(items)} tracks).")
 
-    def rip(self):
+    def rip(self, selected_only=False):
         if self.ripping or not self.toc or self.drive is None:
             return
-        tracks = self._selected_tracks()
+        tracks = self._selected_tracks() if selected_only else sorted(self.toc["offsets"])
+        if not tracks:
+            mod = "Cmd" if IS_MAC else "Ctrl"
+            self._set_status(f"Select the tracks to rip first ({mod}/Shift + click, {mod}+A for all).",
+                             error=True)
+            return
         fmt, br = self.format_var.get(), self.bitrate_var.get()
         if fmt not in self._encoders:
             self._set_status(f"{fmt} encoding is not available on this system.", error=True)
@@ -5123,8 +5131,9 @@ class CdWindow:
                             self.listbox.selection_set(i)
                     if self.toc:
                         n = len(self.toc["offsets"])
-                        self._set_status(f"{n} tracks — CD info from MusicBrainz." if self.info
-                                         else f"{n} tracks — no CD info found (files: track_XX).")
+                        self._set_status((f"{n} tracks — CD info from MusicBrainz." if self.info
+                                          else f"{n} tracks — no CD info found (files: track_XX).")
+                                         + (" Cmd" if IS_MAC else " Ctrl") + "/Shift + click selects tracks.")
                 elif kind == "rip_progress":
                     self._draw_progress(msg[1], msg[2])
                 elif kind == "rip_file":
