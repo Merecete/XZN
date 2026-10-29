@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.5
+Xenon-Zones (XZN) v1.1.0
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -22,6 +22,8 @@ Features
 - Type-to-search in the playlist, mini mode (click the XZN wordmark)
 - Media keys (Windows: global hotkeys, Linux: MPRIS via jeepney)
 - Writes a log file (xzn.log) to the app data directory
+- Plays and rips audio CDs (CD button): MP3 / OGG / FLAC / WAV, titles
+  from MusicBrainz, tags + ReplayGain - no external tools needed
 - Ships with a built-in sample intro track (installed on first run)
 
 Platform notes
@@ -41,6 +43,7 @@ import queue
 import random
 import re
 import shutil
+import struct
 import threading
 import traceback
 from collections import deque
@@ -203,7 +206,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.5"
+VERSION = "1.1.0"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -564,6 +567,7 @@ def load_settings():
         "track_durations": {},
         "replaygain": True,
         "resume": None,
+        "cd": {},
     }
     try:
         if os.path.isfile(SETTINGS_PATH):
@@ -605,6 +609,9 @@ def load_settings():
             rg = data.get("replaygain")
             if isinstance(rg, bool):
                 defaults["replaygain"] = rg
+            cd = data.get("cd")
+            if isinstance(cd, dict):
+                defaults["cd"] = cd
             res = data.get("resume")
             if isinstance(res, dict) and isinstance(res.get("path"), str) \
                     and isinstance(res.get("pos"), (int, float)):
@@ -628,6 +635,7 @@ def save_settings(state):
             "track_durations": dict(state.get("track_durations") or {}),
             "replaygain": bool(state.get("replaygain", True)),
             "resume": state.get("resume"),
+            "cd": dict(state.get("cd") or {}),
         }
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -1274,6 +1282,8 @@ class Player(threading.Thread):
         # path of the track that should follow the current one (or None).
         # It is called from this thread shortly before a track ends.
         self.next_provider = None
+        # Display name for a path (set by the app: playlist names, CD titles)
+        self.name_for = os.path.basename
         self.gapless = True
         # ReplayGain: linear gain applied to the samples being decoded.
         self.replaygain_enabled = True
@@ -1302,7 +1312,7 @@ class Player(threading.Thread):
 
     def open_file(self, path, start_pos=0.0):
         self.current_path = path
-        self.title_text = os.path.basename(path)
+        self.title_text = self.name_for(path)
         self._gen += 1
         self._want_pause = False
         self._want_resume = False
@@ -1530,7 +1540,7 @@ class Player(threading.Thread):
     def _open_track(self, path):
         """Open a file and build its track context. Raises if the file
         can't be opened; returns None if it has no playable streams."""
-        cont = av.open(path)
+        cont, media_file = open_media(path)
         try:
             self._enable_hw_threads(cont)
             vstream, astream = self._pick_streams(cont)
@@ -1540,7 +1550,7 @@ class Player(threading.Thread):
             meta = self._collect_meta(cont, vstream, astream)
             time_offset = self._detect_pts_offset(cont, vstream, astream)
             rg = None
-            if astream is not None:
+            if astream is not None and not is_cdda(path):
                 try:
                     rg = read_replaygain(path, cont.metadata,
                                          getattr(astream, "metadata", None))
@@ -1554,11 +1564,13 @@ class Player(threading.Thread):
                 "vstream": vstream, "astream": astream,
                 "meta": meta, "time_offset": time_offset, "rg": rg,
                 "resampler": self._new_resampler() if astream is not None else None,
-                "demux": cont.demux(), "flushed": False,
+                "demux": cont.demux(), "flushed": False, "file": media_file,
             }
         except Exception:
             try:
                 cont.close()
+                if media_file is not None:
+                    media_file.close()
             except Exception:
                 _log_swallowed()
             raise
@@ -1568,6 +1580,8 @@ class Player(threading.Thread):
             return
         try:
             ctx["cont"].close()
+            if ctx.get("file") is not None:
+                ctx["file"].close()
         except Exception:
             _log_swallowed()
 
@@ -1595,7 +1609,7 @@ class Player(threading.Thread):
         except Exception as e:
             print(f"[XZN] next_provider failed: {e}")
             return None
-        if not nxt_path or not os.path.isfile(nxt_path):
+        if not nxt_path or not (is_cdda(nxt_path) or os.path.isfile(nxt_path)):
             return None
         try:
             ctx = self._open_track(nxt_path)
@@ -1625,7 +1639,7 @@ class Player(threading.Thread):
         ctx = pending["ctx"]
         meta = ctx["meta"]
         self.current_path = ctx["path"]
-        self.title_text = os.path.basename(ctx["path"])
+        self.title_text = self.name_for(ctx["path"])
         self.duration = meta["duration"]
         self.has_video = False
         self.video_size_native = (0, 0)
@@ -3877,6 +3891,1291 @@ class BgPopup:
             self.app._bg_popup = None
 
 
+# ========================================================================
+# Audio CD: play and rip (no external tools needed)
+# ========================================================================
+# CD access uses only what the operating system provides:
+#   macOS   – audio CDs are mounted by the system (cddafs); the tracks
+#             appear as AIFF files and the TOC is in .TOC.plist
+#   Windows – DeviceIoControl (IOCTL_CDROM_READ_TOC / _RAW_READ) via ctypes
+#   Linux   – ioctl (CDROMREADTOCENTRY / CDROMREADAUDIO) on /dev/sr*
+# Encoding uses the FFmpeg libraries bundled with PyAV (lameenc as MP3
+# fallback), tags are written with mutagen, ReplayGain is measured here.
+#
+# TOC format used throughout:
+#   {"first": 1, "last": 12, "offsets": {1: 0, 2: 18055, ...},
+#    "lengths": {1: 18055, ...}, "leadout": 225422}
+# offsets/lengths in sectors (LSN, track 1 normally starts at 0),
+# audio tracks only. 1 sector = 1/75 s = 2352 bytes of 16-bit stereo PCM.
+
+CD_SECTOR_BYTES = 2352
+CD_SECTORS_PER_SECOND = 75
+CD_SESSION_GAP = 11400          # enhanced CDs: audio session → data session
+CD_FORMATS = ["MP3", "OGG", "FLAC", "WAV"]
+CD_BITRATES = ["128", "192", "256", "320"]
+CDDA_PREFIX = "cdda://"
+
+MB_LEAD_IN = 150
+MB_USER_AGENT = f"XZN/{VERSION} ( https://github.com/Merecete/XZN )"
+MB_URL = "https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc}&inc=recordings+artist-credits&fmt=json"
+
+
+def musicbrainz_disc_id(toc: dict) -> str:
+    """MusicBrainz disc ID (28 chars) for a TOC, per
+    https://musicbrainz.org/doc/Disc_ID_Calculation"""
+    import hashlib
+    import base64
+    first, last = toc["first"], toc["last"]
+    s = "%02X%02X%08X" % (first, last, toc["leadout"] + MB_LEAD_IN)
+    for n in range(1, 100):
+        off = toc["offsets"].get(n)
+        s += "%08X" % (off + MB_LEAD_IN if off is not None else 0)
+    digest = hashlib.sha1(s.encode("ascii")).digest()
+    return (base64.b64encode(digest).decode("ascii")
+            .replace("+", ".").replace("/", "_").replace("=", "-"))
+
+
+def musicbrainz_toc_param(toc: dict) -> str:
+    """'first+last+leadout+offset1+…' — lets MusicBrainz find the disc
+    by track lengths even when this exact disc ID isn't registered."""
+    parts = [toc["first"], toc["last"], toc["leadout"] + MB_LEAD_IN]
+    parts += [toc["offsets"][n] + MB_LEAD_IN
+              for n in range(toc["first"], toc["last"] + 1) if n in toc["offsets"]]
+    return "+".join(str(p) for p in parts)
+
+
+def _artist_credit(ac) -> str:
+    return "".join(f"{c.get('name', '')}{c.get('joinphrase', '')}"
+                   for c in (ac or []) if isinstance(c, dict)).strip()
+
+
+def _ssl_context():
+    """Certificates for HTTPS. Frozen builds (especially on macOS) may not
+    find the system store, so prefer certifi when it is bundled."""
+    import ssl
+    try:
+        import certifi  # type: ignore
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def parse_musicbrainz(data: dict, disc_id: str, n_tracks: int):
+    """Turn a MusicBrainz discid response into
+    {"artist", "album", "date", "disc", "tracks": {position: {"title", "artist"}}}."""
+    if not isinstance(data, dict):
+        return None
+
+    # Unregistered discs sometimes exist as a simple "CD stub".
+    if data.get("tracks") and data.get("title") and not data.get("releases"):
+        album_artist = data.get("artist") or ""
+        tracks = {}
+        for i, t in enumerate(data["tracks"], start=1):
+            tracks[i] = {"title": t.get("title") or "", "artist": t.get("artist") or album_artist}
+        return {"artist": album_artist, "album": data.get("title") or "",
+                "date": "", "disc": None, "tracks": tracks}
+
+    best = None
+    for rel in data.get("releases") or []:
+        media = rel.get("media") or []
+        for medium in media:
+            discs = [d.get("id") for d in medium.get("discs") or []]
+            score = 0
+            if disc_id in discs:
+                score += 2
+            if (medium.get("track-count") or len(medium.get("tracks") or [])) == n_tracks:
+                score += 1
+            if medium.get("tracks"):
+                score += 1
+            if best is None or score > best[0]:
+                best = (score, rel, medium, len(media))
+    if best is None:
+        return None
+    _, rel, medium, n_media = best
+
+    album_artist = _artist_credit(rel.get("artist-credit"))
+    tracks = {}
+    for t in medium.get("tracks") or []:
+        pos = t.get("position")
+        if not isinstance(pos, int):
+            continue
+        rec = t.get("recording") or {}
+        tracks[pos] = {
+            "title": t.get("title") or rec.get("title") or "",
+            "artist": (_artist_credit(t.get("artist-credit"))
+                       or _artist_credit(rec.get("artist-credit")) or album_artist),
+        }
+    disc = None
+    if n_media > 1 and isinstance(medium.get("position"), int):
+        disc = f"{medium['position']}/{n_media}"
+    return {"artist": album_artist, "album": rel.get("title") or "",
+            "date": (rel.get("date") or "")[:4], "disc": disc, "tracks": tracks}
+
+
+def lookup_cd_info(toc: dict, timeout: float = 12.0):
+    """Ask MusicBrainz about the disc. Returns parsed info, or None if the
+    disc is unknown or the lookup failed (no internet, timeout, …)."""
+    import urllib.request
+    import urllib.error
+    disc_id = musicbrainz_disc_id(toc)
+    url = MB_URL.format(disc_id=disc_id, toc=musicbrainz_toc_param(toc))
+    print(f"[XZN] MusicBrainz lookup: disc ID {disc_id}")
+    req = urllib.request.Request(url, headers={"User-Agent": MB_USER_AGENT,
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print("[XZN] MusicBrainz: disc not found")
+        else:
+            print(f"[XZN] MusicBrainz lookup failed: HTTP {e.code}")
+        return None
+    except Exception as e:
+        print(f"[XZN] MusicBrainz lookup failed: {e}")
+        return None
+    n_tracks = len(toc["offsets"])
+    info = parse_musicbrainz(data, disc_id, n_tracks)
+    if info:
+        print(f"[XZN] MusicBrainz: {info['artist']} – {info['album']} "
+              f"({len(info['tracks'])} titles)")
+    return info
+
+
+_BAD_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename(name: str, max_len: int = 120) -> str:
+    """Make a string usable as a file/folder name on all platforms."""
+    name = _BAD_FILENAME_CHARS.sub("_", name or "").strip().rstrip(". ")
+    if len(name) > max_len:
+        name = name[:max_len].rstrip(". ")
+    return name or "_"
+
+
+
+def _toc_from_entries(entries, leadout):
+    """entries: [(track_no, lsn, is_data)], leadout: LSN of the lead-out.
+    Returns the audio-only TOC (enhanced CDs handled like MusicBrainz)."""
+    entries = sorted(entries, key=lambda e: e[1])
+    audio = [(n, lsn) for n, lsn, data in entries if not data]
+    if not audio:
+        return None
+    last_audio_lsn = audio[-1][1]
+    data_after = [lsn for n, lsn, data in entries if data and lsn > last_audio_lsn]
+    if data_after:
+        leadout = data_after[0] - CD_SESSION_GAP
+    offsets = {n: lsn for n, lsn in audio}
+    lengths = {}
+    for i, (n, lsn) in enumerate(audio):
+        end = audio[i + 1][1] if i + 1 < len(audio) else leadout
+        lengths[n] = max(0, end - lsn)
+    return {"first": audio[0][0], "last": audio[-1][0], "offsets": offsets,
+            "lengths": lengths, "leadout": leadout}
+
+
+def _parse_full_toc(raw):
+    """READ TOC format 0x02 ("full TOC") as stored by macOS. Returns
+    (entries, leadout) of the first session, or None."""
+    if not raw:
+        return None
+    body = raw[4:] if (len(raw) - 4) % 11 == 0 else (raw if len(raw) % 11 == 0 else None)
+    if body is None:
+        return None
+    entries, leadout = [], None
+    for i in range(0, len(body), 11):
+        session, adr_ctrl, _tno, point, _m, _s, _f, _z, pm, ps, pf = body[i:i + 11]
+        if session != 1:
+            continue
+        lba = (pm * 60 + ps) * 75 + pf - 150
+        if 1 <= point <= 99:
+            entries.append((point, lba, bool(adr_ctrl & 0x04)))
+        elif point == 0xA2:
+            leadout = lba
+    # data tracks from later sessions matter for the enhanced-CD lead-out
+    for i in range(0, len(body), 11):
+        session, adr_ctrl, _tno, point, _m, _s, _f, _z, pm, ps, pf = body[i:i + 11]
+        if session > 1 and 1 <= point <= 99:
+            entries.append((point, (pm * 60 + ps) * 75 + pf - 150, True))
+    if not entries or leadout is None:
+        return None
+    return entries, leadout
+
+
+# --- macOS ---------------------------------------------------------------
+class MacCdDrive:
+    """An audio CD mounted by macOS (cddafs) under /Volumes."""
+    kind = "mac"
+
+    def __init__(self, volume):
+        self.id = volume
+        self.label = os.path.basename(volume) or volume
+        self.lock = threading.Lock()
+
+    def _track_files(self):
+        files = {}
+        for name in os.listdir(self.id):
+            m = re.match(r"\D*(\d+)", name)
+            if m and name.lower().endswith((".aiff", ".aif", ".cdda")):
+                files.setdefault(int(m.group(1)), os.path.join(self.id, name))
+        return files
+
+    def read_toc(self):
+        import plistlib
+        with open(os.path.join(self.id, ".TOC.plist"), "rb") as f:
+            pl = plistlib.load(f)
+        parsed = _parse_full_toc(pl.get("Format 0x02 TOC Data"))
+        if parsed:
+            return _toc_from_entries(*parsed)
+        # Fallback: the readable per-track keys
+        sessions = pl.get("Sessions") or []
+        entries, leadout = [], None
+        for si, sess in enumerate(sessions):
+            for t in sess.get("Track Array") or []:
+                entries.append((int(t.get("Point", 0)), int(t.get("Start Block", 0)),
+                                bool(t.get("Data", False)) or si > 0))
+            if si == 0:
+                leadout = int(sess.get("Leadout Block", 0))
+        if not entries:
+            raise RuntimeError("No tracks in the CD's table of contents.")
+        # "Start Block" may include the 2-second lead-in (150 sectors)
+        if min(e[1] for e in entries) >= 150:
+            entries = [(n, lsn - 150, d) for n, lsn, d in entries]
+            leadout -= 150
+        return _toc_from_entries(entries, leadout)
+
+    def play_path(self, track):
+        return self._track_files().get(track)
+
+    def iter_pcm(self, track, toc, cancel=None):
+        """Yield 16-bit little-endian stereo PCM of one track."""
+        path = self._track_files().get(track)
+        if not path:
+            raise RuntimeError(f"Track {track} not found on the CD.")
+        with open(path, "rb") as f:
+            if f.read(4) != b"FORM":
+                raise RuntimeError("Unexpected CD track format.")
+            f.read(8)
+            while True:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    raise RuntimeError("No audio data in CD track.")
+                cid, size = hdr[:4], int.from_bytes(hdr[4:], "big")
+                if cid == b"SSND":
+                    offset = int.from_bytes(f.read(4), "big")
+                    f.read(4 + offset)
+                    remaining = size - 8 - offset
+                    break
+                f.seek(size + (size & 1), 1)
+            chunk = CD_SECTOR_BYTES * CD_SECTORS_PER_SECOND
+            while remaining > 0:
+                if cancel is not None and cancel.is_set():
+                    return
+                data = f.read(min(chunk, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                data = data[:len(data) - (len(data) % 4)]
+                yield np.frombuffer(data, ">i2").astype("<i2").tobytes()
+
+    def eject(self):
+        import subprocess
+        subprocess.run(["diskutil", "eject", self.id], capture_output=True, timeout=30)
+
+
+def _list_mac_drives():
+    out = []
+    try:
+        for name in sorted(os.listdir("/Volumes")):
+            vol = os.path.join("/Volumes", name)
+            if os.path.isfile(os.path.join(vol, ".TOC.plist")):
+                out.append(MacCdDrive(vol))
+    except Exception:
+        _log_swallowed()
+    return out
+
+
+# --- Windows / Linux: raw sector access ----------------------------------
+class _RawCdDrive:
+    """Base for drives read sector by sector (Windows, Linux)."""
+    READ_CHUNK = 24          # sectors per request (drives cap ~64 KB)
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._toc = None
+
+    def toc(self):
+        if self._toc is None:
+            self._toc = self.read_toc()
+        return self._toc
+
+    def play_path(self, track):
+        return f"{CDDA_PREFIX}{self.id}/{track}"
+
+    def read_sectors(self, lsn, count):
+        """Read count audio sectors starting at lsn (thread-safe).
+        A failing block is retried once, then replaced by silence so a
+        scratch doesn't abort playback or ripping."""
+        out = bytearray()
+        pos, end = lsn, lsn + count
+        with self.lock:
+            self._open()
+            while pos < end:
+                n = min(self.READ_CHUNK, end - pos)
+                data = None
+                for _attempt in range(2):
+                    try:
+                        data = self._read_raw(pos, n)
+                        break
+                    except OSError as e:
+                        err = e
+                if data is None:
+                    print(f"[XZN] CD read error at sector {pos}: {err}")
+                    data = bytes(n * CD_SECTOR_BYTES)
+                out += data
+                pos += n
+        return bytes(out)
+
+    def iter_pcm(self, track, toc, cancel=None):
+        start, length = toc["offsets"][track], toc["lengths"][track]
+        pos, end = start, start + length
+        step = CD_SECTORS_PER_SECOND
+        while pos < end:
+            if cancel is not None and cancel.is_set():
+                return
+            n = min(step, end - pos)
+            yield self.read_sectors(pos, n)
+            pos += n
+
+
+class WinCdDrive(_RawCdDrive):
+    kind = "windows"
+    IOCTL_CDROM_READ_TOC = 0x00024000
+    IOCTL_CDROM_RAW_READ = 0x0002403E
+    IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
+
+    def __init__(self, letter):
+        super().__init__()
+        self.id = letter.rstrip(":\\/").upper() + ":"
+        self.label = self.id
+        self._h = None
+
+    @staticmethod
+    def _k32():
+        """kernel32 with explicit signatures (64-bit handles, unsigned flags)."""
+        k32 = ctypes.windll.kernel32
+        if not getattr(k32, "_xzn_typed", False):
+            from ctypes import wintypes as wt
+            k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                        wt.DWORD, wt.DWORD, wt.HANDLE]
+            k32.CreateFileW.restype = wt.HANDLE
+            k32.DeviceIoControl.argtypes = [wt.HANDLE, wt.DWORD, ctypes.c_void_p, wt.DWORD,
+                                            ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD),
+                                            ctypes.c_void_p]
+            k32.DeviceIoControl.restype = wt.BOOL
+            k32.CloseHandle.argtypes = [wt.HANDLE]
+            k32._xzn_typed = True
+        return k32
+
+    def _open(self):
+        if self._h is not None:
+            return
+        k32 = self._k32()
+        h = k32.CreateFileW(f"\\\\.\\{self.id}", 0x80000000, 0x1 | 0x2, None, 3, 0, None)
+        if not h or h == ctypes.c_void_p(-1).value:
+            raise OSError(k32.GetLastError() or 2, f"Cannot open drive {self.id}")
+        self._h = h
+
+    def _ioctl(self, code, inbuf, outsize):
+        from ctypes import wintypes as wt
+        k32 = self._k32()
+        out = ctypes.create_string_buffer(max(outsize, 1))
+        got = wt.DWORD(0)
+        inb = ctypes.create_string_buffer(bytes(inbuf), len(inbuf)) if inbuf else None
+        ok = k32.DeviceIoControl(self._h, code, inb, len(inbuf) if inbuf else 0,
+                                 out, outsize, ctypes.byref(got), None)
+        if not ok:
+            raise OSError(k32.GetLastError(), "DeviceIoControl failed")
+        return out.raw[:got.value]
+
+    def read_toc(self):
+        with self.lock:
+            self._open()
+            raw = self._ioctl(self.IOCTL_CDROM_READ_TOC, None, 4 + 100 * 8)
+        return self.parse_toc(raw)
+
+    @staticmethod
+    def parse_toc(raw):
+        """CDROM_TOC (MSF addresses) → TOC."""
+        first, last = raw[2], raw[3]
+        entries, leadout = [], None
+        for i in range(last - first + 2):
+            d = raw[4 + i * 8: 12 + i * 8]
+            if len(d) < 8:
+                break
+            ctrl, number = d[1] >> 4, d[2]
+            lba = (d[5] * 60 + d[6]) * 75 + d[7] - 150
+            if number == 0xAA:
+                leadout = lba
+            else:
+                entries.append((number, lba, bool(ctrl & 0x04)))
+        if leadout is None or not entries:
+            raise RuntimeError("No audio CD in the drive.")
+        return _toc_from_entries(entries, leadout)
+
+    def _read_raw(self, lsn, n):
+        info = struct.pack("<qII", lsn * 2048, n, 2)   # TrackMode CDDA = 2
+        data = self._ioctl(self.IOCTL_CDROM_RAW_READ, info, n * CD_SECTOR_BYTES)
+        if len(data) < n * CD_SECTOR_BYTES:
+            raise OSError(0, "short read")
+        return data
+
+    def eject(self):
+        with self.lock:
+            self._open()
+            try:
+                self._ioctl(self.IOCTL_STORAGE_EJECT_MEDIA, None, 0)
+            finally:
+                self._k32().CloseHandle(self._h)
+                self._h = None
+        self._toc = None
+
+
+def _list_windows_drives():
+    out = []
+    try:
+        k32 = ctypes.windll.kernel32
+        mask = k32.GetLogicalDrives()
+        for i in range(26):
+            if mask & (1 << i):
+                letter = chr(65 + i) + ":"
+                if k32.GetDriveTypeW(letter + "\\") == 5:      # DRIVE_CDROM
+                    out.append(WinCdDrive(letter))
+    except Exception:
+        _log_swallowed()
+    return out
+
+
+class LinuxCdDrive(_RawCdDrive):
+    kind = "linux"
+    CDROMREADTOCHDR = 0x5305
+    CDROMREADTOCENTRY = 0x5306
+    CDROMREADAUDIO = 0x530E
+    CDROMEJECT = 0x5309
+    CDROM_LBA = 0x01
+    CDROM_LEADOUT = 0xAA
+
+    def __init__(self, dev):
+        super().__init__()
+        self.id = dev
+        self.label = dev
+        self._fd = None
+        self.READ_CHUNK = 24
+
+    def _open(self):
+        if self._fd is None:
+            self._fd = os.open(self.id, os.O_RDONLY | os.O_NONBLOCK)
+
+    def read_toc(self):
+        import fcntl
+        with self.lock:
+            self._open()
+            hdr = bytearray(2)
+            fcntl.ioctl(self._fd, self.CDROMREADTOCHDR, hdr, True)
+            first, last = hdr[0], hdr[1]
+            entries, leadout = [], None
+            for n in list(range(first, last + 1)) + [self.CDROM_LEADOUT]:
+                # struct cdrom_tocentry: track, adr:4|ctrl:4, format, pad,
+                # union addr (int lba), datamode, pad[3]  -> 12 bytes
+                buf = bytearray(struct.pack("=BBBxiB3x", n, 0, self.CDROM_LBA, 0, 0))
+                fcntl.ioctl(self._fd, self.CDROMREADTOCENTRY, buf, True)
+                _t, adr_ctrl, _fmt, lba, _dm = struct.unpack("=BBBxiB3x", bytes(buf))
+                if n == self.CDROM_LEADOUT:
+                    leadout = lba
+                else:
+                    entries.append((n, lba, bool((adr_ctrl >> 4) & 0x04)))
+        return _toc_from_entries(entries, leadout)
+
+    def _read_raw(self, lsn, n):
+        import fcntl
+        import ctypes as _ct      # (module-level ctypes is Windows-only)
+        buf = _ct.create_string_buffer(n * CD_SECTOR_BYTES)
+        # struct cdrom_read_audio: union addr (int), u8 format, int nframes,
+        # u8 *buf  (native alignment)
+        req = bytearray(struct.pack("@iBiP", lsn, self.CDROM_LBA, n, _ct.addressof(buf)))
+        fcntl.ioctl(self._fd, self.CDROMREADAUDIO, req, True)
+        return buf.raw
+
+    def eject(self):
+        import fcntl
+        with self.lock:
+            self._open()
+            try:
+                fcntl.ioctl(self._fd, self.CDROMEJECT, 0)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+        self._toc = None
+
+
+def _list_linux_drives():
+    out, seen = [], set()
+    for dev in [f"/dev/sr{i}" for i in range(4)] + ["/dev/cdrom"]:
+        try:
+            real = os.path.realpath(dev)
+            if os.path.exists(dev) and real not in seen:
+                seen.add(real)
+                out.append(LinuxCdDrive(dev))
+        except Exception:
+            _log_swallowed()
+    return out
+
+
+_CD_DRIVES = {}
+
+
+def list_cd_drives():
+    """All CD drives (macOS: mounted audio CDs). Drive objects are reused
+    so playback and ripping share one lock and TOC cache per drive."""
+    if IS_MAC:
+        found = _list_mac_drives()
+    elif IS_WINDOWS:
+        found = _list_windows_drives()
+    elif sys.platform.startswith("linux"):
+        found = _list_linux_drives()
+    else:
+        found = []
+    result = []
+    for d in found:
+        result.append(_CD_DRIVES.setdefault(d.id, d))
+    return result
+
+
+def is_cdda(path):
+    return isinstance(path, str) and path.startswith(CDDA_PREFIX)
+
+
+def _cdda_lookup(path):
+    drive_id, track = path[len(CDDA_PREFIX):].rsplit("/", 1)
+    drive = _CD_DRIVES.get(drive_id)
+    if drive is None:
+        drive = WinCdDrive(drive_id) if IS_WINDOWS else LinuxCdDrive(drive_id)
+        _CD_DRIVES[drive_id] = drive
+    return drive, int(track)
+
+
+class CdTrackFile:
+    """A CD track presented as a seekable WAV file, read from the disc on
+    demand, so the player (PyAV) can play and seek it like any file."""
+
+    HEADER = 44
+    CACHE_SECTORS = CD_SECTORS_PER_SECOND        # read ahead 1 s
+
+    def __init__(self, drive, start, sectors):
+        self.drive, self.start, self.sectors = drive, start, sectors
+        data_len = sectors * CD_SECTOR_BYTES
+        self.size = self.HEADER + data_len
+        self.header = (b"RIFF" + struct.pack("<I", 36 + data_len) + b"WAVEfmt "
+                       + struct.pack("<IHHIIHH", 16, 1, 2, 44100, 44100 * 4, 4, 16)
+                       + b"data" + struct.pack("<I", data_len))
+        self.pos = 0
+        self._cache_start, self._cache = -1, b""
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = self.size - self.pos
+        n = max(0, min(n, self.size - self.pos))
+        out = bytearray()
+        if self.pos < self.HEADER and n:
+            part = self.header[self.pos:self.pos + n]
+            out += part
+            self.pos += len(part)
+            n -= len(part)
+        while n > 0:
+            off = self.pos - self.HEADER
+            sec = off // CD_SECTOR_BYTES
+            if not (self._cache_start <= sec < self._cache_start + len(self._cache) // CD_SECTOR_BYTES):
+                cnt = min(self.CACHE_SECTORS, self.sectors - sec)
+                self._cache = self.drive.read_sectors(self.start + sec, cnt)
+                self._cache_start = sec
+            i = off - self._cache_start * CD_SECTOR_BYTES
+            part = self._cache[i:i + n]
+            if not part:
+                break
+            out += part
+            self.pos += len(part)
+            n -= len(part)
+        return bytes(out)
+
+    def seek(self, offset, whence=0):
+        base = {0: 0, 1: self.pos, 2: self.size}[whence]
+        self.pos = max(0, min(self.size, base + offset))
+        return self.pos
+
+    def tell(self):
+        return self.pos
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def close(self):
+        self._cache = b""
+
+
+def open_media(path):
+    """av.open() that also understands cdda:// CD tracks.
+    Returns (container, file_object_to_close_or_None)."""
+    if is_cdda(path):
+        drive, track = _cdda_lookup(path)
+        toc = drive.toc()
+        f = CdTrackFile(drive, toc["offsets"][track], toc["lengths"][track])
+        return av.open(f, format="wav"), f
+    return av.open(path), None
+
+
+# --- Encoding --------------------------------------------------------------
+def cd_encoders():
+    """Formats that can be written on this system."""
+    ok = {"WAV"}
+    try:
+        names = set(av.codecs_available)
+    except Exception:
+        names = set()
+    if "flac" in names:
+        ok.add("FLAC")
+    if "libvorbis" in names:
+        ok.add("OGG")
+    if "libmp3lame" in names:
+        ok.add("MP3")
+    else:
+        try:
+            import lameenc  # noqa: F401
+            ok.add("MP3")
+        except Exception:
+            print("[XZN] MP3 encoding unavailable (no libmp3lame in PyAV, no lameenc)")
+    return ok
+
+
+class TrackEncoder:
+    """Writes 16-bit stereo 44.1 kHz PCM to MP3 / OGG / FLAC / WAV."""
+
+    def __init__(self, path, fmt, bitrate="320"):
+        self.path, self.fmt = path, fmt
+        self._wav = self._lame = self._out = self._file = None
+        self._samples = 0
+        if fmt == "WAV":
+            import wave
+            self._wav = wave.open(path, "wb")
+            self._wav.setnchannels(2)
+            self._wav.setsampwidth(2)
+            self._wav.setframerate(44100)
+            return
+        if fmt == "MP3" and "libmp3lame" not in set(av.codecs_available):
+            import lameenc
+            self._lame = lameenc.Encoder()
+            self._lame.set_bit_rate(int(bitrate))
+            self._lame.set_in_sample_rate(44100)
+            self._lame.set_channels(2)
+            self._lame.set_quality(2)
+            self._file = open(path, "wb")
+            return
+        codec = {"MP3": "libmp3lame", "OGG": "libvorbis", "FLAC": "flac"}[fmt]
+        self._out = av.open(path, "w")
+        st = self._out.add_stream(codec, rate=44100)
+        cc = getattr(st, "codec_context", st)
+        for target in (cc, st):
+            try:
+                target.layout = "stereo"
+                break
+            except Exception:
+                continue
+        if fmt in ("MP3", "OGG"):
+            try:
+                cc.bit_rate = int(bitrate) * 1000
+            except Exception:
+                st.bit_rate = int(bitrate) * 1000
+        self._stream = st
+        from fractions import Fraction
+        self._tb = Fraction(1, 44100)
+
+    def write(self, pcm):
+        if not pcm:
+            return
+        if self._wav is not None:
+            self._wav.writeframes(pcm)
+            return
+        if self._lame is not None:
+            self._file.write(self._lame.encode(pcm))
+            return
+        arr = np.frombuffer(pcm, "<i2").reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(arr, format="s16", layout="stereo")
+        frame.sample_rate = 44100
+        frame.time_base = self._tb
+        frame.pts = self._samples
+        self._samples += arr.shape[1] // 2
+        for pkt in self._stream.encode(frame):
+            self._out.mux(pkt)
+
+    def close(self):
+        if self._wav is not None:
+            self._wav.close()
+        elif self._lame is not None:
+            self._file.write(self._lame.flush())
+            self._file.close()
+        elif self._out is not None:
+            for pkt in self._stream.encode(None):
+                self._out.mux(pkt)
+            self._out.close()
+
+
+class LoudnessMeter:
+    """ReplayGain 2.0 (EBU R128 integrated loudness, -18 LUFS reference)
+    measured on the PCM stream while ripping."""
+
+    def __init__(self, fs=44100):
+        self.fs = fs
+        self.sos = self._k_weighting(fs)
+        self.zi = np.zeros((self.sos.shape[0], 2, 2))
+        self.sub = int(fs * 0.1)          # 100 ms sub-blocks
+        self.rest = np.zeros((0, 2))
+        self.energy = []                  # per sub-block: mean square per channel
+        self.peak = 0
+
+    @staticmethod
+    def _k_weighting(fs):
+        """ITU-R BS.1770 K-weighting for any sample rate (same derivation
+        as libebur128 / ffmpeg's ebur128 filter)."""
+        f0, g, q = 1681.974450955533, 3.999843853973347, 0.7071752369554196
+        k = np.tan(np.pi * f0 / fs)
+        vh = 10 ** (g / 20)
+        vb = vh ** 0.4996667741545416
+        a0 = 1 + k / q + k * k
+        shelf = [(vh + vb * k / q + k * k) / a0, 2 * (k * k - vh) / a0,
+                 (vh - vb * k / q + k * k) / a0, 1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0]
+        f0, q = 38.13547087602444, 0.5003270373238773
+        k = np.tan(np.pi * f0 / fs)
+        a0 = 1 + k / q + k * k
+        highpass = [1.0, -2.0, 1.0, 1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0]
+        return np.array([shelf, highpass])
+
+    def add(self, pcm):
+        if not _SCIPY_AVAILABLE or not pcm:
+            return
+        from scipy.signal import sosfilt
+        x = np.frombuffer(pcm, "<i2").reshape(-1, 2)
+        self.peak = max(self.peak, int(np.abs(x.astype(np.int32)).max()))
+        y, self.zi = sosfilt(self.sos, x / 32768.0, axis=0, zi=self.zi)
+        y = np.concatenate([self.rest, y])
+        n = len(y) // self.sub
+        if n:
+            blocks = y[:n * self.sub].reshape(n, self.sub, 2)
+            self.energy.extend((blocks ** 2).mean(axis=1))
+        self.rest = y[n * self.sub:]
+
+    def result(self):
+        """(gain_db, peak) or None."""
+        if len(self.energy) < 4:
+            return None
+        e = np.array(self.energy)
+        z = np.array([e[i:i + 4].mean(axis=0) for i in range(len(e) - 3)])   # 400 ms, 75 % overlap
+        power = z.sum(axis=1)
+        with np.errstate(divide="ignore"):
+            loud = -0.691 + 10 * np.log10(power)
+        gated = power[loud > -70.0]
+        if not len(gated):
+            return None
+        rel = -0.691 + 10 * np.log10(gated.mean()) - 10.0
+        final = power[(loud > -70.0) & (loud > rel)]
+        lufs = -0.691 + 10 * np.log10(final.mean())
+        return -18.0 - lufs, self.peak / 32768.0
+
+
+def write_cd_tags(path, fmt, tags):
+    """Write tags + ReplayGain with mutagen (ID3 for MP3/WAV, Vorbis
+    comments for OGG/FLAC). Never raises."""
+    if not _MUTAGEN_AVAILABLE:
+        return
+    tags = {k: str(v) for k, v in tags.items() if v not in (None, "")}
+    try:
+        if fmt in ("MP3", "WAV"):
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TDRC, TRCK, TPOS, TXXX
+            frames = {"title": TIT2, "artist": TPE1, "album": TALB, "albumartist": TPE2,
+                      "date": TDRC, "tracknumber": TRCK, "discnumber": TPOS}
+            if fmt == "WAV":
+                from mutagen.wave import WAVE
+                audio = WAVE(path)
+                if audio.tags is None:
+                    audio.add_tags()
+                id3 = audio.tags
+            else:
+                try:
+                    id3 = ID3(path)
+                except Exception:
+                    id3 = ID3()
+            for k, v in tags.items():
+                if k in frames:
+                    id3.add(frames[k](encoding=3, text=[v]))
+                elif k.startswith("replaygain_"):
+                    id3.add(TXXX(encoding=3, desc=k.upper(), text=[v]))
+            if fmt == "WAV":
+                audio.save()
+            else:
+                id3.save(path, v2_version=3)
+        else:
+            audio = MutagenFile(path)
+            for k, v in tags.items():
+                audio[k.upper()] = [v]
+            audio.save()
+    except Exception as e:
+        print(f"[XZN] Tagging failed for {os.path.basename(path)}: {e}")
+
+
+def rip_cd(drive, toc, tracks, outdir, fmt, bitrate, info, report, cancel):
+    """Rip tracks (list of track numbers). report(kind, *args) is called
+    from this worker thread: ("progress", pct, label), ("file", path),
+    ("done", n), ("stopped", n), ("error", msg)."""
+    if info and (info.get("artist") or info.get("album")):
+        outdir = os.path.join(outdir, safe_filename(
+            f"{info.get('artist') or 'Unknown Artist'} - {info.get('album') or 'Unknown Album'}"))
+    os.makedirs(outdir, exist_ok=True)
+    ext = {"MP3": ".mp3", "OGG": ".ogg", "FLAC": ".flac", "WAV": ".wav"}[fmt]
+    n_disc = len(toc["offsets"])
+    done = 0
+    for idx, track in enumerate(tracks, start=1):
+        meta = ((info or {}).get("tracks") or {}).get(track - toc["first"] + 1) or {}
+        name = (f"{track:02d} - {safe_filename(meta['title'])}" if meta.get("title")
+                else f"track_{track:02d}")
+        path = os.path.join(outdir, name + ext)
+        label = f"Track {track:02d} ({idx}/{len(tracks)})"
+        total = max(1, toc["lengths"][track] * CD_SECTOR_BYTES)
+        written = 0
+        enc = meter = None
+        try:
+            enc = TrackEncoder(path, fmt, bitrate)
+            meter = LoudnessMeter()
+            for pcm in drive.iter_pcm(track, toc, cancel):
+                enc.write(pcm)
+                meter.add(pcm)
+                written += len(pcm)
+                report("progress", min(99, int(written * 100 / total)), label)
+            enc.close()
+            enc = None
+            if cancel.is_set():
+                try:
+                    os.remove(path)
+                except OSError:
+                    _log_swallowed()
+                report("stopped", done)
+                return
+            tags = {"tracknumber": f"{track}/{n_disc}"}
+            if info:
+                tags.update({"title": meta.get("title"),
+                             "artist": meta.get("artist") or info.get("artist"),
+                             "album": info.get("album"), "albumartist": info.get("artist"),
+                             "date": info.get("date"), "discnumber": info.get("disc")})
+            rg = meter.result()
+            if rg:
+                tags["replaygain_track_gain"] = f"{rg[0]:+.2f} dB"
+                tags["replaygain_track_peak"] = f"{rg[1]:.6f}"
+            write_cd_tags(path, fmt, tags)
+            done += 1
+            report("file", path)
+        except Exception as e:
+            traceback.print_exc()
+            if enc is not None:
+                try:
+                    enc.close()
+                except Exception:
+                    _log_swallowed()
+            report("error", f"Track {track}: {e}")
+            return
+    report("done", done)
+
+
+# ------------------------------------------------------------------------
+class CdWindow:
+    """Audio CD window: play the CD in XZN or rip it (MP3/OGG/FLAC/WAV,
+    titles from MusicBrainz, tags + ReplayGain). Opened with the CD
+    button; a second click closes it like the other tool windows."""
+
+    def __init__(self, master, app):
+        self.app = app
+        p = app.palette
+        self.palette = p
+        self.win = tk.Toplevel(master)
+        self.win.title("CD – XZN")
+        self.win.configure(bg=p["PANEL"])
+        self.win.resizable(True, True)
+        self.win.transient(master)
+        apply_window_icon(self.win)
+        try:
+            app._attach_macos_menu(self.win)
+        except Exception:
+            _log_swallowed()
+
+        self.drives = []
+        self.drive = None
+        self.toc = None
+        self.info = None
+        self.ripping = False
+        self._cancel = None
+        self._token = 0
+        self._queue = queue.Queue()
+        self._encoders = cd_encoders()
+        cfg = app._cd_settings
+        self.format_var = tk.StringVar(value=cfg.get("format") if cfg.get("format") in self._encoders
+                                       else ("MP3" if "MP3" in self._encoders else "FLAC" if "FLAC" in self._encoders else "WAV"))
+        self.bitrate_var = tk.StringVar(value=cfg.get("bitrate") or "320")
+        self.eject_var = tk.BooleanVar(value=bool(cfg.get("eject", True)))
+        self.outdir = cfg.get("outdir") or os.path.join(os.path.expanduser("~"), "Music", "XZN-Rips")
+        self.drive_var = tk.StringVar(value="")
+
+        frame = tk.Frame(self.win, bg=p["PANEL"], padx=12, pady=10)
+        frame.pack(fill="both", expand=True)
+
+        # --- Drive row --------------------------------------------------
+        top = tk.Frame(frame, bg=p["PANEL"])
+        top.pack(fill="x")
+        tk.Label(top, text="DRIVE", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        self.drive_menu_box = tk.Frame(top, bg=p["PANEL"])
+        self.drive_menu_box.pack(side="left", padx=(6, 6))
+        app._mkbtn(top, "SCAN", self.scan, w=6).pack(side="left")
+        self.btn_eject = app._mkbtn(top, "EJECT", self.eject, w=6)
+        self.btn_eject.pack(side="left", padx=(4, 0))
+
+        self.album_lbl = tk.Label(frame, text="", font=FONT_UI_B, width=1,
+                                  bg=p["PANEL"], fg=p["ACCENT"], anchor="w")
+        self.album_lbl.pack(fill="x", pady=(8, 2))
+
+        # --- Track list -------------------------------------------------
+        lrow = tk.Frame(frame, bg=p["SUNKEN"])
+        lrow.pack(fill="both", expand=True)
+        list_bg = darken(p["BG"], 0.65) if luminance(p["BG"]) < 0.5 else "#ffffff"
+        self.listbox = tk.Listbox(lrow, height=12, width=56, selectmode="extended", bd=0,
+                                  highlightthickness=0, exportselection=False,
+                                  bg=list_bg, fg=p["WHITE"], font=("Courier New", 9),
+                                  selectbackground=mix(p["PANEL"], p["ACCENT"], 0.35),
+                                  selectforeground=p["WHITE"], activestyle="none")
+        self.listbox.pack(fill="both", expand=True, padx=1, pady=1)
+        self.listbox.bind("<Double-Button-1>", lambda e: self.play())
+
+        # --- Options ----------------------------------------------------
+        opt = tk.Frame(frame, bg=p["PANEL"])
+        opt.pack(fill="x", pady=(8, 0))
+        tk.Label(opt, text="FORMAT", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        formats = [f for f in CD_FORMATS if f in self._encoders]
+        FlatOptionMenu(opt, self.format_var, formats, palette=p, width=5,
+                       on_change=lambda v: self._save()).pack(side="left", padx=(6, 12))
+        tk.Label(opt, text="BITRATE", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        FlatOptionMenu(opt, self.bitrate_var, CD_BITRATES, palette=p, width=4,
+                       on_change=lambda v: self._save()).pack(side="left", padx=(6, 12))
+        tk.Checkbutton(opt, text="Eject when done", variable=self.eject_var,
+                       command=self._save, bg=p["PANEL"], fg=p["WHITE"],
+                       activebackground=p["PANEL"], activeforeground=p["ACCENT"],
+                       selectcolor=p["SUNKEN"], font=FONT_UI, bd=0,
+                       highlightthickness=0).pack(side="left")
+
+        od = tk.Frame(frame, bg=p["PANEL"])
+        od.pack(fill="x", pady=(6, 0))
+        tk.Label(od, text="OUTPUT", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
+        self.outdir_lbl = tk.Label(od, text=self.outdir, font=FONT_UI, width=1, anchor="w",
+                                   bg=p["SUNKEN"], fg=p["WHITE"], padx=6)
+        self.outdir_lbl.pack(side="left", fill="x", expand=True, padx=(6, 4), ipady=2)
+        app._mkbtn(od, "…", self.pick_outdir, w=3).pack(side="left")
+
+        self.progress = tk.Canvas(frame, height=12, bg=p["SUNKEN"], highlightthickness=0)
+        self.progress.pack(fill="x", pady=(8, 4))
+
+        brow = tk.Frame(frame, bg=p["PANEL"])
+        brow.pack(fill="x")
+        app._mkbtn(brow, "▶ PLAY", self.play, w=8).pack(side="left")
+        self.btn_rip = app._mkbtn(brow, "RIP", self.rip, w=6)
+        self.btn_rip.pack(side="left", padx=(4, 0))
+        app._mkbtn(brow, "STOP", self.stop_rip, w=6).pack(side="left", padx=(4, 0))
+        app._mkbtn(brow, "OPEN FOLDER", self.open_folder, w=12).pack(side="right")
+
+        self.status = tk.Label(frame, text="", font=FONT_UI, width=1, anchor="w",
+                               bg=p["PANEL"], fg=p["GRAY"])
+        self.status.pack(fill="x", pady=(6, 0))
+
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.win.bind("<Escape>", lambda e: self.close())
+
+        self.win.update_idletasks()
+        mx = master.winfo_rootx() + master.winfo_width() // 2
+        my = master.winfo_rooty() + master.winfo_height() // 2
+        w, h = self.win.winfo_width(), self.win.winfo_height()
+        self.win.geometry(f"+{max(0, mx - w // 2)}+{max(0, my - h // 2)}")
+        try:
+            app._extra_alpha_windows.append(self.win)
+        except Exception:
+            _log_swallowed()
+        self._poll()
+        self.win.after(50, self.scan)
+
+    # --- helpers ---------------------------------------------------------
+    def _set_status(self, text, error=False):
+        try:
+            self.status.config(text=text, fg=self.palette["ERR"] if error else self.palette["GRAY"])
+        except Exception:
+            _log_swallowed()
+
+    def _save(self):
+        self.app._cd_settings = {"format": self.format_var.get(), "bitrate": self.bitrate_var.get(),
+                                 "eject": bool(self.eject_var.get()), "outdir": self.outdir}
+        self.app._persist_settings()
+
+    def _draw_progress(self, pct, label=""):
+        c = self.progress
+        try:
+            c.delete("all")
+            w = max(c.winfo_width(), 10)
+            c.create_rectangle(0, 0, int(w * pct / 100), 12, fill=self.palette["ACCENT"], width=0)
+            if label:
+                c.create_text(6, 6, text=f"{label}  {pct}%", anchor="w",
+                              fill=self.palette["WHITE"], font=("Helvetica", 8))
+        except Exception:
+            _log_swallowed()
+
+    def _track_label(self, n):
+        sec = self.toc["lengths"][n] / CD_SECTORS_PER_SECOND
+        title, artist = self.track_title(n)
+        name = title or "Audio Track"
+        if title and artist and self.info and artist != self.info.get("artist"):
+            name += f"  ·  {artist}"
+        return f"{n:02d}  {fmt_time(sec):>6}  {name}"
+
+    def track_title(self, n):
+        if not self.info or not self.toc:
+            return "", ""
+        t = (self.info.get("tracks") or {}).get(n - self.toc["first"] + 1) or {}
+        return t.get("title") or "", t.get("artist") or ""
+
+    def _render(self):
+        self.listbox.delete(0, "end")
+        if not self.toc:
+            return
+        for n in sorted(self.toc["offsets"]):
+            self.listbox.insert("end", self._track_label(n))
+        self.listbox.selection_set(0, "end")
+        info = self.info
+        if info and (info.get("artist") or info.get("album")):
+            txt = f"{info.get('artist') or '?'} – {info.get('album') or '?'}"
+            if info.get("date"):
+                txt += f" ({info['date']})"
+            if info.get("disc"):
+                txt += f"  [CD {info['disc']}]"
+            self.album_lbl.config(text=txt)
+        else:
+            self.album_lbl.config(text="")
+
+    def _selected_tracks(self):
+        tracks = sorted(self.toc["offsets"]) if self.toc else []
+        sel = [tracks[i] for i in self.listbox.curselection() if i < len(tracks)]
+        return sel or tracks
+
+    # --- scan / lookup ---------------------------------------------------
+    def scan(self):
+        self.drives = list_cd_drives()
+        for w in self.drive_menu_box.winfo_children():
+            w.destroy()
+        if not self.drives:
+            self.drive = self.toc = self.info = None
+            self._render()
+            self._set_status("No audio CD found." if IS_MAC else "No CD drive found.")
+            return
+        labels = [d.label for d in self.drives]
+        if self.drive_var.get() not in labels:
+            self.drive_var.set(labels[0])
+        FlatOptionMenu(self.drive_menu_box, self.drive_var, labels, palette=self.palette,
+                       width=14, on_change=lambda v: self._read_disc()).pack()
+        self._read_disc()
+
+    def _read_disc(self):
+        self.drive = next((d for d in self.drives if d.label == self.drive_var.get()), None)
+        self.toc = self.info = None
+        self._render()
+        if self.drive is None:
+            return
+        self._set_status("Reading CD …")
+        self._token += 1
+        token, drive = self._token, self.drive
+
+        def work():
+            try:
+                if hasattr(drive, "_toc"):
+                    drive._toc = None
+                toc = drive.read_toc() if not hasattr(drive, "toc") else drive.toc()
+            except Exception as e:
+                self._queue.put(("toc_error", token, str(e)))
+                return
+            self._queue.put(("toc", token, toc))
+            self._queue.put(("info", token, lookup_cd_info(toc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # --- actions ---------------------------------------------------------
+    def play(self):
+        if not self.toc or self.drive is None:
+            return
+        tracks = sorted(self.toc["offsets"])
+        sel = self.listbox.curselection()
+        start = tracks[sel[0]] if sel else tracks[0]
+        items = []
+        for n in tracks:
+            path = self.drive.play_path(n)
+            if not path:
+                continue
+            title, artist = self.track_title(n)
+            if title and artist:
+                name = f"{artist} - {title}"
+            else:
+                name = title or f"CD Track {n:02d}"
+            items.append((path, name, self.toc["lengths"][n] / CD_SECTORS_PER_SECOND, n == start))
+        self.app.play_cd_tracks(items)
+        self._set_status(f"Playing the CD in XZN ({len(items)} tracks).")
+
+    def rip(self):
+        if self.ripping or not self.toc or self.drive is None:
+            return
+        tracks = self._selected_tracks()
+        fmt, br = self.format_var.get(), self.bitrate_var.get()
+        if fmt not in self._encoders:
+            self._set_status(f"{fmt} encoding is not available on this system.", error=True)
+            return
+        # Reading the disc for playback and ripping at the same time
+        # makes both stutter: stop CD playback first.
+        self.app.stop_cd_playback(self.drive)
+        self.ripping = True
+        self._cancel = threading.Event()
+        self._save()
+        drive, toc, info, outdir, cancel = self.drive, self.toc, self.info, self.outdir, self._cancel
+
+        def report(kind, *args):
+            self._queue.put(("rip_" + kind,) + args)
+
+        threading.Thread(target=rip_cd, args=(drive, toc, tracks, outdir, fmt, br, info,
+                                              report, cancel), daemon=True).start()
+        self._set_status(f"Ripping {len(tracks)} track(s) …")
+
+    def stop_rip(self):
+        if self.ripping and self._cancel is not None:
+            self._cancel.set()
+            self._set_status("Stopping after the current read …")
+
+    def eject(self):
+        if self.ripping or self.drive is None:
+            return
+        drive = self.drive
+        self.app.stop_cd_playback(drive)
+        self.toc = self.info = None
+        self._render()
+
+        def work():
+            try:
+                drive.eject()
+                self._queue.put(("ejected",))
+            except Exception as e:
+                self._queue.put(("eject_error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def pick_outdir(self):
+        d = filedialog.askdirectory(title="Rip CDs to …", initialdir=self.outdir, parent=self.win)
+        if d:
+            self.outdir = d
+            self.outdir_lbl.config(text=d)
+            self._save()
+
+    def open_folder(self):
+        try:
+            os.makedirs(self.outdir, exist_ok=True)
+        except Exception:
+            _log_swallowed()
+        open_with_system(self.outdir)
+
+    # --- worker messages -------------------------------------------------
+    def _poll(self):
+        try:
+            while True:
+                msg = self._queue.get_nowait()
+                kind = msg[0]
+                if kind in ("toc", "info", "toc_error") and msg[1] != self._token:
+                    continue
+                if kind == "toc":
+                    self.toc = msg[2]
+                    self._render()
+                    total = sum(self.toc["lengths"].values()) / CD_SECTORS_PER_SECOND
+                    self._set_status(f"{len(self.toc['offsets'])} tracks — {fmt_time(total)}. "
+                                     "Looking up CD info …")
+                elif kind == "toc_error":
+                    self._set_status(f"Could not read the CD: {msg[2]}", error=True)
+                elif kind == "info":
+                    self.info = msg[2]
+                    sel = self.listbox.curselection()
+                    self._render()
+                    if sel:
+                        self.listbox.selection_clear(0, "end")
+                        for i in sel:
+                            self.listbox.selection_set(i)
+                    if self.toc:
+                        n = len(self.toc["offsets"])
+                        self._set_status(f"{n} tracks — CD info from MusicBrainz." if self.info
+                                         else f"{n} tracks — no CD info found (files: track_XX).")
+                elif kind == "rip_progress":
+                    self._draw_progress(msg[1], msg[2])
+                elif kind == "rip_file":
+                    print(f"[XZN] Ripped: {msg[1]}")
+                elif kind in ("rip_done", "rip_stopped", "rip_error"):
+                    self.ripping = False
+                    self._draw_progress(0)
+                    if kind == "rip_done":
+                        self._set_status(f"Done — {msg[1]} track(s) ripped.")
+                        if self.eject_var.get():
+                            self.eject()
+                    elif kind == "rip_stopped":
+                        self._set_status(f"Stopped after {msg[1]} track(s).")
+                    else:
+                        self._set_status(f"Rip failed: {msg[1]}", error=True)
+                elif kind == "ejected":
+                    self._set_status("CD ejected.")
+                    if IS_MAC:
+                        self.win.after(1500, self.scan)
+                elif kind == "eject_error":
+                    self._set_status(f"Eject failed: {msg[1]}", error=True)
+        except queue.Empty:
+            pass
+        except Exception:
+            _log_swallowed()
+        try:
+            if self.win.winfo_exists():
+                self.win.after(100, self._poll)
+        except Exception:
+            _log_swallowed()
+
+    def close(self):
+        """Close the window. While ripping it is only hidden, so the rip
+        continues; the CD button brings it back."""
+        if self.ripping:
+            try:
+                self.win.withdraw()
+            except Exception:
+                _log_swallowed()
+            return
+        try:
+            if self.win in self.app._extra_alpha_windows:
+                self.app._extra_alpha_windows.remove(self.win)
+        except Exception:
+            _log_swallowed()
+        try:
+            self.win.destroy()
+        except Exception:
+            _log_swallowed()
+
+
 # ------------------------------------------------------------------------
 # Media keys
 # ------------------------------------------------------------------------
@@ -4203,6 +5502,8 @@ class App:
         self._sample_offered = bool(settings.get("sample_offered", False))
         self._replaygain = bool(settings.get("replaygain", True))
         self._saved_resume = settings.get("resume")
+        self._cd_settings = dict(settings.get("cd") or {})
+        self._cd_win = None
         self.palette = build_palette(self.accent)
 
         # Runtime cache of track durations (path → seconds). Persisted
@@ -4226,6 +5527,7 @@ class App:
         self.player.set_eq_enabled(self._eq_enabled)
         self.player.set_replaygain(self._replaygain)
         self.player.next_provider = self._provide_next
+        self.player.name_for = lambda p: (self._display_names.get(p) or os.path.basename(p))
 
         self.playlist = []
         self.current_index = -1
@@ -4476,7 +5778,7 @@ class App:
         Runs in a worker thread. UI updates go through `after(0, …)`
         because tkinter is not thread-safe.
         """
-        pending = [p for p in paths if p not in self._track_durations]
+        pending = [p for p in paths if p not in self._track_durations and not is_cdda(p)]
         if not pending:
             return
 
@@ -4580,9 +5882,11 @@ class App:
             "eq_enabled": bool(self._eq_enabled),
             "eq_preamp": float(self._eq_preamp),
             "sample_offered": bool(getattr(self, "_sample_offered", False)),
-            "track_durations": dict(getattr(self, "_track_durations", {}) or {}),
+            "track_durations": {k: v for k, v in (getattr(self, "_track_durations", {}) or {}).items()
+                                if not is_cdda(k)},
             "replaygain": bool(getattr(self, "_replaygain", True)),
             "resume": self._resume_state(),
+            "cd": dict(getattr(self, "_cd_settings", {}) or {}),
         })
 
     def set_replaygain(self, en):
@@ -4984,6 +6288,7 @@ class App:
         self.btn_rep = self._mkbtn(brow, "REP:OFF", self.cycle_repeat, w=9)
         self.btn_rep.pack(side="right", padx=(0, 2))
         self._mkbtn(brow, "VIDEO", self._toggle_video_window, w=6).pack(side="right", padx=(0, 6))
+        self._mkbtn(brow, "CD", self.show_cd, w=3).pack(side="right", padx=(0, 2))
 
         self.seek = tk.Scale(self._main_frame, from_=0, to=1000, orient="horizontal",
                              length=120, command=self._on_seek_cmd, bg=p["PANEL"],
@@ -5853,6 +7158,48 @@ class App:
     def show_theme(self):
         self._toggle_window("_theme_win", lambda: ThemeWindow(self.root, self).win)
 
+    def show_cd(self):
+        """CD button: open the CD window, or close it if it is open."""
+        w = self._cd_win
+        try:
+            if w is not None and w.win.winfo_exists():
+                if w.win.state() == "withdrawn":       # hidden while ripping
+                    w.win.deiconify()
+                    w.win.lift()
+                else:
+                    w.close()
+                return
+        except Exception:
+            _log_swallowed()
+        self._cd_win = CdWindow(self.root, self)
+        self._apply_alpha_to_windows()
+
+    def play_cd_tracks(self, items):
+        """items: [(path, display_name, seconds, is_start)] from the CD
+        window. Adds the CD tracks to the playlist and starts playing."""
+        start_path = None
+        for path, name, secs, is_start in items:
+            self._display_names[path] = name
+            if secs > 0:
+                self._track_durations[path] = secs
+            if path not in self.playlist:
+                self.playlist.append(path)
+                self.listbox.insert("end", self._format_pl_line(path))
+            else:
+                self._refresh_line_for(path)
+            if is_start:
+                start_path = path
+        self._update_pl_count()
+        if start_path is not None:
+            self.play_index(self.playlist.index(start_path))
+
+    def stop_cd_playback(self, drive):
+        """Stop playback if it is reading from the given CD drive."""
+        cur = self.player.current_path or ""
+        if self.player.state != "idle" and (cur.startswith(f"{CDDA_PREFIX}{drive.id}/")
+                                             or cur.startswith(drive.id + os.sep)):
+            self.stop_play()
+
     def show_equalizer(self):
         """EQ button / E key: open the equalizer, or close it if open."""
         try:
@@ -6643,6 +7990,15 @@ class App:
 
     # --- Shutdown --------------------------------------------------------
     def on_close(self):
+        try:
+            if self._cd_win is not None and self._cd_win.ripping:
+                if not messagebox.askyesno("Ripping in progress",
+                                           "A CD is being ripped. Quit anyway?\n"
+                                           "The current track will be incomplete."):
+                    return
+                self._cd_win._cancel.set()
+        except Exception:
+            _log_swallowed()
         if self._media_keys is not None:
             try:
                 self._media_keys.stop()
