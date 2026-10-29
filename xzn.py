@@ -5095,6 +5095,13 @@ class CdWindow:
                                bg=p["PANEL"], fg=p["GRAY"])
         self.status.pack(fill="x", pady=(6, 0))
 
+        # Close button like in the other XZN windows
+        tk.Frame(frame, bg=p["ACCENT_LO"], height=1).pack(fill="x", pady=(8, 8))
+        footer = tk.Frame(frame, bg=p["PANEL"])
+        footer.pack(fill="x")
+        make_flat_button(footer, "Close", self.close, palette=p,
+                         padx=14, pady=4).pack(side="right")
+
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         self.win.bind("<Escape>", lambda e: self.close())
 
