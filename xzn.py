@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.0.4
+Xenon-Zones (XZN) v1.0.5
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -203,7 +203,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -2689,6 +2689,18 @@ def show_license_window(parent, palette, app=None):
     Read-only, scrollable, matching the app's look.
     Registers itself with the app so the alpha slider affects it too.
     """
+    # Only one license window: a second click on "License" closes it.
+    if app is not None:
+        old = getattr(app, "_license_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                if old in app._extra_alpha_windows:
+                    app._extra_alpha_windows.remove(old)
+                old.destroy()
+                app._license_win = None
+                return None
+        except Exception:
+            _log_swallowed()
     p = palette
     win = tk.Toplevel(parent)
     win.title("License – XZN")
@@ -2794,6 +2806,7 @@ def show_license_window(parent, palette, app=None):
             win.after(30, app._apply_alpha_to_windows)
         except Exception:
             _log_swallowed()
+        app._license_win = win
 
     try:
         win.focus_set()
@@ -4233,6 +4246,9 @@ class App:
         # videos then play audio-only until VIDEO (or F) shows it again.
         self._video_user_hidden = False
         self._eq_win = None
+        self._info_win = None
+        self._theme_win = None
+        self._license_win = None
         self._tag_win = None
         self._main_frame = None
         self._frame_counter = 0
@@ -5795,9 +5811,27 @@ class App:
         self._apply_alpha_to_windows()
         self._persist_settings()
 
-    def show_info(self):
-        InfoWindow(self.root, self.palette, self)
+    def _toggle_window(self, attr, opener):
+        """Open a tool window, or close it when it is already open
+        (same behaviour as the VIDEO button). Prevents duplicates."""
+        win = getattr(self, attr, None)
+        try:
+            if win is not None and win.winfo_exists():
+                try:
+                    if win in self._extra_alpha_windows:
+                        self._extra_alpha_windows.remove(win)
+                except Exception:
+                    _log_swallowed()
+                win.destroy()
+                setattr(self, attr, None)
+                return
+        except Exception:
+            _log_swallowed()
+        setattr(self, attr, opener())
         self._apply_alpha_to_windows()
+
+    def show_info(self):
+        self._toggle_window("_info_win", lambda: InfoWindow(self.root, self.palette, self).win)
 
     def _close_shortcuts(self, event=None):
         if self._help_win is not None and self._help_win.is_alive():
@@ -5817,15 +5851,14 @@ class App:
         return "break"
 
     def show_theme(self):
-        ThemeWindow(self.root, self)
-        self._apply_alpha_to_windows()
+        self._toggle_window("_theme_win", lambda: ThemeWindow(self.root, self).win)
 
     def show_equalizer(self):
+        """EQ button / E key: open the equalizer, or close it if open."""
         try:
             if self._eq_win is not None and self._eq_win.win.winfo_exists():
-                self._eq_win.win.deiconify()
-                self._eq_win.win.lift()
-                self._apply_alpha_to_windows()
+                self._eq_win.win.destroy()
+                self._eq_win = None
                 return
         except Exception:
             _log_swallowed()
