@@ -1,12 +1,10 @@
 @echo off
 rem ======================================================================
-rem  Builds XZN and XZN-CDR for Windows, plus the two setup programs.
+rem  Builds XZN for Windows, plus the setup program.
 rem  Run from anywhere:   installer\build_windows.bat
 rem
 rem  Needs:  Python 3.10+ (python.org), Inno Setup 6 (for the installers)
-rem  XZN-CDR: put a *full* ffmpeg build into xzn-cdr\ffmpeg\
-rem           (ffmpeg.exe + ffprobe.exe) so it gets bundled.
-rem  Output:  dist\XZN\, dist\XZN-CDR\, release\*_Setup_*.exe
+rem  Output:  dist\XZN\, release\XZN_Setup_v<version>.exe
 rem  All build files (specs, Inno scripts) live in this installer\ folder.
 rem ======================================================================
 setlocal
@@ -17,19 +15,13 @@ if not exist .venv-build (
 )
 call .venv-build\Scripts\activate.bat || goto :fail
 python -m pip install --upgrade pip
-pip install -r requirements.txt -r xzn-cdr\requirements.txt pyinstaller || goto :fail
+pip install -r requirements.txt pyinstaller || goto :fail
 
 for /f "delims=" %%v in ('python installer\version.py xzn.py') do set VER=%%v
-for /f "delims=" %%v in ('python installer\version.py xzn-cdr\xzn-cdr.py') do set CDR_VER=%%v
 echo.
-echo === Building XZN %VER% / XZN-CDR %CDR_VER% ===
+echo === Building XZN %VER% ===
 
 pyinstaller --noconfirm --clean installer\xzn.spec || goto :fail
-
-if not exist xzn-cdr\ffmpeg\ffmpeg.exe (
-    echo WARNING: xzn-cdr\ffmpeg\ffmpeg.exe not found - XZN-CDR will need ffmpeg on the PATH.
-)
-pyinstaller --noconfirm --clean installer\xzn-cdr.spec || goto :fail
 
 rem --- Inno Setup ------------------------------------------------------
 set ISCC=
@@ -43,14 +35,12 @@ if not defined ISCC (
     goto :done
 )
 %ISCC% /Q /DMyAppVersion=%VER% installer\xzn.iss || goto :fail
-%ISCC% /Q /DMyAppVersion=%CDR_VER% installer\xzn-cdr.iss || goto :fail
 
 :done
 echo.
 echo Done:
 echo   dist\XZN\XZN.exe
-echo   dist\XZN-CDR\XZN-CDR.exe
-if defined ISCC echo   release\  - setup programs
+if defined ISCC echo   release\XZN_Setup_v%VER%.exe
 exit /b 0
 
 :fail

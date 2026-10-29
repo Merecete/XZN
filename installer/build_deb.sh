@@ -1,19 +1,17 @@
 #!/bin/sh
 # ======================================================================
-#  Builds .deb packages from the PyInstaller output:
-#    dist/XZN/               -> release/xzn_<ver>_<arch>.deb
-#    dist/XZN-CDR/           -> release/xzn-cdr_<ver>_<arch>.deb
-#  Usage: sh installer/build_deb.sh <xzn-version> [cdr-version] [arch]
+#  Builds the .deb package from the PyInstaller output:
+#    dist/XZN/  ->  release/XZN-Linux-x86_64_v<ver>.deb
+#  Usage: sh installer/build_deb.sh <version> [arch]
 #  (normally called by build_unix.sh)
 #
-#  Installs to /opt/xzn and /opt/xzn-cdr, with a menu entry, an icon and
-#  a 'xzn' / 'xzn-cdr' command. Remove with: sudo apt remove xzn xzn-cdr
+#  Installs to /opt/xzn, with a menu entry, an icon and the command
+#  'xzn'. Remove with: sudo apt remove xzn
 # ======================================================================
 set -e
 VER="$1"
-CDR_VER="${2:-$1}"
-ARCH="${3:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
-[ -n "$VER" ] || { echo "Usage: $0 <version> [cdr-version] [arch]"; exit 1; }
+ARCH="${2:-$(dpkg --print-architecture 2>/dev/null || echo amd64)}"
+[ -n "$VER" ] || { echo "Usage: $0 <version> [arch]"; exit 1; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$ROOT/release"
 
@@ -77,7 +75,8 @@ SCRIPT
 
     # Directories 0755, files keep their mode (PyInstaller sets +x where needed).
     find "$PKG" -type d -exec chmod 0755 {} +
-    OUT="$ROOT/release/${PKGNAME}_${PVER}_${ARCH}.deb"
+    case "$ARCH" in amd64) FARCH=x86_64 ;; arm64) FARCH=arm_64 ;; *) FARCH="$ARCH" ;; esac
+    OUT="$ROOT/release/XZN-Linux-${FARCH}_v${PVER}.deb"
     dpkg-deb --build --root-owner-group "$PKG" "$OUT"
     echo "Built: $OUT"
 }
@@ -91,13 +90,6 @@ make_deb xzn "$VER" "$ROOT/dist/XZN" XZN \
     "AudioVideo;Audio;Video;Player;" "libportaudio2" \
     "$AUDIO_MIME$VIDEO_MIME$LIST_MIME" \
     "Streamlined media player with a cyberpunk look
- Audio and video playback, 10-band equalizer, gapless playback,
- ReplayGain volume leveling, mini player and media key support."
-
-make_deb xzn-cdr "$CDR_VER" "$ROOT/dist/XZN-CDR" XZN-CDR \
-    "XZN-CDR" "Rip audio CDs to MP3 / OGG / FLAC / WAV" \
-    "AudioVideo;Audio;DiscBurning;" "ffmpeg" "" \
-    "Audio CD ripper for XZN
- Rips audio CDs to MP3, OGG, FLAC or WAV, looks up artist, album and
- track titles on MusicBrainz and writes tags and ReplayGain for XZN."
-
+ Audio and video playback, audio CD playback and ripping (MP3, OGG,
+ FLAC, WAV with MusicBrainz titles), 10-band equalizer, gapless
+ playback, ReplayGain volume leveling, mini player and media keys."

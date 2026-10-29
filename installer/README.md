@@ -1,43 +1,45 @@
-# Building XZN and XZN-CDR
+# Building XZN
 
-One script per platform builds **both** programs and packages them.
-Everything ends up in `release/`.
+One script per platform builds XZN and packages it. Everything ends up
+in `release/`, already named for the GitHub release.
 
 | Platform | Command | Result |
 |---|---|---|
-| Windows | `installer\build_windows.bat` | `XZN_Setup_v<ver>.exe`, `XZN-CDR_Setup_v<ver>.exe` |
-| Linux (Debian/Ubuntu/Mint) | `sh installer/build_unix.sh` | `xzn_<ver>_amd64.deb`, `xzn-cdr_<ver>_amd64.deb` |
-| macOS | `sh installer/build_unix.sh` | `XZN-<ver>-macOS-arm64.dmg`, `XZN-CDR-<ver>-macOS-arm64.dmg` |
+| Windows | `installer\build_windows.bat` | `XZN_Setup_v<ver>.exe` |
+| Linux | `sh installer/build_unix.sh` | `XZN-Linux-x86_64_v<ver>.deb`, `XZN-Linux-x86_64_v<ver>.tar.xz` |
+| macOS | `sh installer/build_unix.sh` | `XZN-macOS-arm_64_v<ver>.zip` (contains the .dmg) |
 
-All build files live in this folder: the PyInstaller specs
-(`xzn.spec`, `xzn-cdr.spec`), the Inno Setup scripts (`xzn.iss`,
-`xzn-cdr.iss`) and the scripts below. Run them from anywhere; they
-work from the repository root.
+All build files live in this folder: the PyInstaller spec (`xzn.spec`),
+the Inno Setup script (`xzn.iss`) and the scripts below. Run them from
+anywhere; they work from the repository root.
 
-The version number is read from `VERSION = "…"` in `xzn.py` and
-`xzn-cdr/xzn-cdr.py` — change it there, nowhere else.
-The scripts create their own virtual environment (`.venv-build/`).
+The version number is read from `VERSION = "…"` in `xzn.py` — change it
+there, nowhere else. The scripts create their own virtual environment
+(`.venv-build/`).
+
+Audio CD support needs no extra tools on any platform: XZN reads CDs
+through the operating system and encodes with the FFmpeg libraries
+that come with PyAV.
 
 ## Windows
 
 - Python 3.10+ from python.org
-- [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the setup programs
-  (without it you still get the programs in `dist\`)
-- XZN-CDR: put a *full* ffmpeg build (with libcdio) into `xzn-cdr\ffmpeg\`
-  (`ffmpeg.exe`, `ffprobe.exe`), e.g. from gyan.dev — it gets bundled.
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the setup program
+  (without it you still get the program in `dist\`)
 
 ## Linux
 
 ```
-sudo apt install python3-venv python3-tk python3-dev libportaudio2 \
-                 swig pkg-config libcdio-dev libiso9660-dev dpkg-dev
+sudo apt install python3-venv python3-tk python3-dev libportaudio2 dpkg-dev
 ```
 
-Install the result with `sudo apt install ./release/xzn_<ver>_amd64.deb`
-(apt pulls in the dependencies: PortAudio for XZN, ffmpeg for XZN-CDR).
-The packages install to `/opt/xzn` and `/opt/xzn-cdr`, add menu entries,
-"Open with" support for audio/video files, and the commands `xzn` /
-`xzn-cdr`. Remove with `sudo apt remove xzn xzn-cdr`.
+Install the result with `sudo apt install ./release/XZN-Linux-x86_64_v<ver>.deb`
+(apt pulls in PortAudio). The package installs to `/opt/xzn`, adds a
+menu entry, "Open with" support for audio/video files and the command
+`xzn`. Remove with `sudo apt remove xzn`.
+
+Reading audio CDs needs access to the drive (`/dev/sr0`); desktop
+sessions normally grant that, otherwise add the user to the `cdrom` group.
 
 Build on the oldest distribution you want to support — a build made on a
 new system may not start on older ones (glibc).
@@ -49,10 +51,8 @@ new system may not start on older ones (glibc).
 
 The DMG opens the classic install window: drag the app onto
 *Applications*. Run the script from a normal desktop session so Finder
-can arrange that window. The DMG is built for the Mac's own architecture
-(Apple Silicon → arm64).
+can arrange that window. The build is for the Mac's own architecture
+(Apple Silicon → arm_64).
 
-The apps are not notarized, so on first start macOS warns about an
+The app is not notarized, so on first start macOS warns about an
 unidentified developer: right-click the app → **Open** once.
-XZN-CDR additionally needs `brew install ffmpeg libcdio-paranoia`
-(also explained in the DMG's "READ ME").

@@ -1,19 +1,18 @@
 #!/bin/sh
 # ======================================================================
-#  Builds macOS disk images with the classic install window:
+#  Builds the macOS disk image with the classic install window:
 #  the app on the left, an "Applications" shortcut on the right —
-#  drag one onto the other to install.
-#    dist/XZN.app             -> release/XZN-<ver>-macOS-<arch>.dmg
-#    dist/XZN-CDR.app         -> release/XZN-CDR-<ver>-macOS-<arch>.dmg
-#  Usage: sh installer/build_dmg.sh <xzn-version> [cdr-version]
+#  drag one onto the other to install. The .dmg is zipped for the
+#  download:  dist/XZN.app -> release/XZN-macOS-arm_64_v<ver>.zip
+#  Usage: sh installer/build_dmg.sh <version>
 #  (normally called by build_unix.sh)
 # ======================================================================
 set -e
 VER="$1"
-CDR_VER="${2:-$1}"
-[ -n "$VER" ] || { echo "Usage: $0 <version> [cdr-version]"; exit 1; }
+[ -n "$VER" ] || { echo "Usage: $0 <version>"; exit 1; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
+[ "$ARCH" = "arm64" ] && ARCH="arm_64"
 mkdir -p "$ROOT/release"
 
 # make_dmg <app-path> <volume-name> <output.dmg> [readme-text]
@@ -73,16 +72,8 @@ APPLESCRIPT
     echo "Built: $OUT"
 }
 
-make_dmg "$ROOT/dist/XZN.app" "XZN $VER" \
-    "$ROOT/release/XZN-$VER-macOS-$ARCH.dmg"
-
-make_dmg "$ROOT/dist/XZN-CDR.app" "XZN-CDR $CDR_VER" \
-    "$ROOT/release/XZN-CDR-$CDR_VER-macOS-$ARCH.dmg" \
-"XZN-CDR needs two free command line tools from Homebrew (https://brew.sh):
-
-    brew install ffmpeg libcdio-paranoia
-
-Then drag XZN-CDR onto Applications.
-
-First start: macOS may say the app is from an unidentified developer.
-Right-click XZN-CDR in Applications and choose Open once."
+make_dmg "$ROOT/dist/XZN.app" "XZN $VER" "$ROOT/build/dmg/XZN.dmg"
+ZIP="$ROOT/release/XZN-macOS-${ARCH}_v${VER}.zip"
+rm -f "$ZIP"
+ditto -c -k "$ROOT/build/dmg/XZN.dmg" "$ZIP"
+echo "Built: $ZIP"

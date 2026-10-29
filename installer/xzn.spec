@@ -53,7 +53,8 @@ datas = [
     (R("XZN Intro.mp3"), "."),
 ]
 binaries = []
-hiddenimports = []
+# certifi: CA certificates for the HTTPS MusicBrainz lookup (audio CDs)
+hiddenimports = ["certifi"]
 
 
 # --- Packages with native binaries -----------------------------------
