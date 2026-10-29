@@ -4658,6 +4658,15 @@ def list_cd_drives():
     return result
 
 
+def _cd_no_disc(err):
+    """True if an error just means 'no disc in the drive' (shown as a
+    normal hint, not as an error)."""
+    # Linux ENOMEDIUM; Windows ERROR_NOT_READY, ERROR_NO_MEDIA_IN_DRIVE
+    if getattr(err, "errno", None) in (123, 21, 1112):
+        return True
+    return "No audio CD" in str(err)
+
+
 def is_cdda(path):
     return isinstance(path, str) and path.startswith(CDDA_PREFIX)
 
@@ -5227,7 +5236,13 @@ class CdWindow:
                     drive._toc = None
                 toc = drive.read_toc() if not hasattr(drive, "toc") else drive.toc()
             except Exception as e:
-                self._queue.put(("toc_error", token, str(e)))
+                if _cd_no_disc(e):
+                    self._queue.put(("no_disc", token, drive.label))
+                else:
+                    self._queue.put(("toc_error", token, str(e)))
+                return
+            if not toc:                      # data CD / DVD without audio tracks
+                self._queue.put(("no_audio", token, drive.label))
                 return
             self._queue.put(("toc", token, toc))
             self._queue.put(("info", token, lookup_cd_info(toc)))
@@ -5325,7 +5340,7 @@ class CdWindow:
             while True:
                 msg = self._queue.get_nowait()
                 kind = msg[0]
-                if kind in ("toc", "info", "toc_error") and msg[1] != self._token:
+                if kind in ("toc", "info", "toc_error", "no_disc", "no_audio") and msg[1] != self._token:
                     continue
                 if kind == "toc":
                     self.toc = msg[2]
@@ -5335,6 +5350,10 @@ class CdWindow:
                                      "Looking up CD info …")
                 elif kind == "toc_error":
                     self._set_status(f"Could not read the CD: {msg[2]}", error=True)
+                elif kind == "no_disc":
+                    self._set_status(f"No CD in drive {msg[2]}.")
+                elif kind == "no_audio":
+                    self._set_status(f"The disc in {msg[2]} has no audio tracks.")
                 elif kind == "info":
                     self.info = msg[2]
                     sel = self.listbox.curselection()
