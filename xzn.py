@@ -2301,12 +2301,12 @@ class VideoWindow:
 
         brow = tk.Frame(osd, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 2))
-        app._mkbtn(brow, "|◀", app.prev_track).pack(side="left")
-        self._osd_play = app._mkbtn(brow, "▶", app.toggle_play, w=5)
+        app._mkbtn(brow, "|◀", app.prev_track, icon="prev").pack(side="left")
+        self._osd_play = app._mkbtn(brow, "▶", app.toggle_play, w=5, icon="play")
         self._osd_play.pack(side="left", padx=(2, 0))
-        app._mkbtn(brow, "■", self._osd_stop).pack(side="left", padx=(2, 0))
-        app._mkbtn(brow, "▶|", app.next_track).pack(side="left", padx=(2, 0))
-        self._osd_shuf = app._mkbtn(brow, "SHUF", app.toggle_shuffle, w=6)
+        app._mkbtn(brow, "■", self._osd_stop, icon="stop").pack(side="left", padx=(2, 0))
+        app._mkbtn(brow, "▶|", app.next_track, icon="next").pack(side="left", padx=(2, 0))
+        self._osd_shuf = app._mkbtn(brow, "SHUF", app.toggle_shuffle, w=6, icon="shuffle")
         self._osd_shuf.pack(side="right")
         self._osd_rep = app._mkbtn(brow, "REP:OFF", app.cycle_repeat, w=9)
         self._osd_rep.pack(side="right", padx=(0, 2))
@@ -2354,10 +2354,12 @@ class VideoWindow:
             self._osd_marquee.config(text=app.marquee.cget("text"))
             self._osd_cur.config(text=app.cur_lbl.cget("text"))
             self._osd_dur.config(text=app.dur_lbl.cget("text"))
-            for src, dst in ((app.btn_play, self._osd_play),
-                             (app.btn_rep, self._osd_rep),
-                             (app.btn_shuf, self._osd_shuf)):
-                dst.config(text=src.cget("text"), fg=src.cget("fg"), relief=src.cget("relief"))
+            self._osd_rep.config(text=app.btn_rep.cget("text"), fg=app.btn_rep.cget("fg"),
+                                 relief=app.btn_rep.cget("relief"))
+            for src, dst in ((app.btn_play, self._osd_play), (app.btn_shuf, self._osd_shuf)):
+                state = getattr(src, "_xzn_icon", None)
+                if state and getattr(dst, "_xzn_icon", None) != state:
+                    app._set_icon(dst, *state)
             if not self._osd_seek_dragging:
                 self._osd_seek.set(app.seek.get())
         except Exception:
@@ -3170,6 +3172,142 @@ class ThemeWindow:
         except Exception:
             _log_swallowed()
         self.app.apply_accent(DEFAULT_PALETTE["ACCENT"], persist=True, rebuild=True)
+
+
+# ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
+# Button icons
+# ------------------------------------------------------------------------
+# Drawn with PIL instead of Unicode symbols: symbol glyphs look different
+# (or are missing) depending on platform and font, drawn icons are crisp
+# everywhere and take the theme colors. Drawn 4x larger, then scaled down
+# for smooth edges. Coordinates below are on a 0..100 grid.
+
+def draw_icon(name, size, color):
+    """Return a size x size RGBA PIL image of the named icon."""
+    s = size * 4
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rgb = hex_to_rgb(color) + (255,)
+
+    def P(*pts):
+        return [(x * s / 100.0, y * s / 100.0) for x, y in pts]
+
+    def box(x0, y0, x1, y1):
+        return [x0 * s / 100.0, y0 * s / 100.0, x1 * s / 100.0, y1 * s / 100.0]
+
+    w = max(1, int(s * 0.09))          # stroke width
+
+    def arrow_line(pts, head=True):
+        d.line(P(*pts), fill=rgb, width=w, joint="curve")
+        if head:
+            (x0, y0), (x1, y1) = pts[-2], pts[-1]
+            ang = np.arctan2(y1 - y0, x1 - x0)
+            L, spread = 16, 0.55
+            a = (x1 - L * np.cos(ang - spread), y1 - L * np.sin(ang - spread))
+            b = (x1 - L * np.cos(ang + spread), y1 - L * np.sin(ang + spread))
+            d.polygon(P((x1 + 4 * np.cos(ang), y1 + 4 * np.sin(ang)), a, b), fill=rgb)
+
+    if name == "play":
+        d.polygon(P((24, 14), (24, 86), (84, 50)), fill=rgb)
+    elif name == "pause":
+        d.rectangle(box(22, 14, 42, 86), fill=rgb)
+        d.rectangle(box(58, 14, 78, 86), fill=rgb)
+    elif name == "stop":
+        d.rectangle(box(20, 20, 80, 80), fill=rgb)
+    elif name == "prev":
+        d.rectangle(box(16, 18, 28, 82), fill=rgb)
+        d.polygon(P((84, 18), (84, 82), (32, 50)), fill=rgb)
+    elif name == "next":
+        d.rectangle(box(72, 18, 84, 82), fill=rgb)
+        d.polygon(P((16, 18), (16, 82), (68, 50)), fill=rgb)
+    elif name == "shuffle":
+        arrow_line([(8, 28), (30, 28), (62, 72), (88, 72)])
+        arrow_line([(8, 72), (30, 72), (62, 28), (88, 28)])
+    elif name == "eq":
+        for x, knob in ((22, 62), (50, 30), (78, 52)):
+            d.line(P((x, 12), (x, 88)), fill=rgb, width=max(1, w // 2))
+            d.rectangle(box(x - 11, knob - 7, x + 11, knob + 7), fill=rgb)
+    elif name in ("volume", "mute"):
+        d.polygon(P((10, 36), (28, 36), (50, 16), (50, 84), (28, 64), (10, 64)), fill=rgb)
+        if name == "volume":
+            d.arc(box(40, 30, 66, 70), start=-55, end=55, fill=rgb, width=w)
+            d.arc(box(42, 14, 88, 86), start=-55, end=55, fill=rgb, width=w)
+        else:
+            d.line(P((62, 34), (90, 66)), fill=rgb, width=w)
+            d.line(P((62, 66), (90, 34)), fill=rgb, width=w)
+    elif name == "palette":
+        # painter's palette: solid shape with paint wells and a thumb notch
+        clear = (0, 0, 0, 0)
+        d.ellipse(box(6, 10, 94, 90), fill=rgb)
+        for cx, cy in ((30, 36), (50, 25), (71, 34), (27, 60)):
+            d.ellipse(box(cx - 8, cy - 8, cx + 8, cy + 8), fill=clear)
+        d.ellipse(box(58, 60, 100, 102), fill=clear)
+        d.ellipse(box(50, 52, 66, 68), fill=clear)
+    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+class Tooltip:
+    """Small explanation shown after hovering over a widget for a moment."""
+
+    DELAY_MS = 600
+
+    def __init__(self, widget, text, palette):
+        self.widget, self.text, self.palette = widget, text, palette
+        self._job = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._cancel()
+        try:
+            self._job = self.widget.after(self.DELAY_MS, self._show)
+        except Exception:
+            _log_swallowed()
+
+    def _cancel(self):
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except Exception:
+                _log_swallowed()
+            self._job = None
+
+    def _show(self):
+        self._job = None
+        if self._tip is not None:
+            return
+        text = self.text() if callable(self.text) else self.text
+        if not text:
+            return
+        p = self.palette
+        try:
+            tip = tk.Toplevel(self.widget)
+            tip.wm_overrideredirect(True)
+            try:
+                tip.attributes("-topmost", True)
+            except Exception:
+                _log_swallowed()
+            tk.Label(tip, text=text, font=FONT_UI, bg=p["SUNKEN"], fg=p["WHITE"],
+                     padx=7, pady=3, bd=0, highlightthickness=1,
+                     highlightbackground=p["ACCENT_LO"]).pack()
+            x = self.widget.winfo_rootx()
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            tip.geometry(f"+{x}+{y}")
+            self._tip = tip
+        except Exception:
+            _log_swallowed()
+
+    def _hide(self, event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                _log_swallowed()
+            self._tip = None
 
 
 # ------------------------------------------------------------------------
@@ -6175,7 +6313,11 @@ class App:
             _log_swallowed()
 
         if self.shuffle:
-            self.btn_shuf.config(fg=self.palette["ACCENT"], relief="sunken")
+            self._set_icon(self.btn_shuf, "shuffle", True)
+        if self.player._mute:
+            self._set_icon(self.btn_mute, "mute", True)
+        if self.player.state == "playing":
+            self._set_icon(self.btn_play, "pause")
         if self.repeat_mode != 0:
             label = {1: "REP:ONE", 2: "REP:ALL"}[self.repeat_mode]
             self.btn_rep.config(text=label, fg=self.palette["ACCENT"], relief="sunken")
@@ -6198,26 +6340,65 @@ class App:
         self.root.after(40, self._render_bg)
         self.root.after(80, self._apply_alpha_to_windows)
 
-    def _mkbtn(self, parent, text, cmd, w=4, bg=None):
+    def _icon(self, name, active=False):
+        """Theme-colored PhotoImage for a button icon (cached)."""
+        if not hasattr(self, "_icon_cache"):
+            self._icon_cache = {}
+            try:
+                line = int(tkfont.Font(font=FONT_BTN).metrics("linespace"))
+            except Exception:
+                line = 16
+            self._icon_size = max(12, min(24, line - 2))
+        color = self.palette["ACCENT"] if active else self.palette["WHITE"]
+        key = (name, color, self._icon_size)
+        if key not in self._icon_cache:
+            self._icon_cache[key] = ImageTk.PhotoImage(draw_icon(name, self._icon_size, color))
+        return self._icon_cache[key]
+
+    def _set_icon(self, btn, name, active=False):
+        """Switch a button's icon; active = highlighted (accent color)."""
+        try:
+            btn.config(image=self._icon(name, active), relief="sunken" if active else "raised")
+            btn._xzn_icon = (name, active)
+        except Exception:
+            _log_swallowed()
+
+    def _mkbtn(self, parent, text, cmd, w=4, bg=None, icon=None, tip=None):
+        """Flat button. icon: name of a drawn icon (see draw_icon), shown
+        instead of the text; tip: hover explanation (str or callable)."""
         p = self.palette
         bg_color = bg if bg else p["RAISED"]
         fg_color = p["WHITE"]
         hover_bg = lighten(bg_color, 0.15)
+        # An icon button keeps a single space as text with compound="center"
+        # so Tk sizes it exactly like the text buttons next to it.
+        extra = {}
+        if icon:
+            extra = {"image": self._icon(icon), "compound": "center"}
+            text = " "
 
         if IS_MAC or not IS_WINDOWS:
-            lbl = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
-                           font=FONT_BTN, padx=8, pady=3,
-                           relief="raised", bd=1, cursor="hand2")
-            lbl.bind("<Button-1>", lambda e: cmd())
-            lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_bg))
-            lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
-            return lbl
+            btn = tk.Label(parent, text=text, bg=bg_color, fg=fg_color,
+                           font=FONT_BTN, padx=10 if icon else 8, pady=3,
+                           relief="raised", bd=1, cursor="hand2", **extra)
+            btn.bind("<Button-1>", lambda e: cmd())
+            btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
+            btn.bind("<Leave>", lambda e: btn.config(bg=bg_color))
         else:
-            return tk.Button(parent, text=text, width=w, command=cmd,
-                             bg=bg_color, fg=fg_color,
-                             activebackground=hover_bg,
-                             activeforeground=fg_color,
-                             relief="raised", bd=1, font=FONT_BTN, takefocus=0)
+            if icon:
+                extra.update(padx=10)
+            else:
+                extra.update(width=w)
+            btn = tk.Button(parent, text=text, command=cmd,
+                            bg=bg_color, fg=fg_color,
+                            activebackground=hover_bg,
+                            activeforeground=fg_color,
+                            relief="raised", bd=1, font=FONT_BTN, takefocus=0, **extra)
+        if icon:
+            btn._xzn_icon = (icon, False)
+        if tip:
+            Tooltip(btn, tip, p)
+        return btn
 
     def _mk_pl_scale(self, parent):
         p = self.palette
@@ -6257,10 +6438,13 @@ class App:
         hdr.pack_propagate(False)
         self._ui_hdr = hdr
 
-        self._mkbtn(hdr, "INFO", self.show_info, w=6).pack(side="left", padx=(10, 0))
-        self._mkbtn(hdr, "C", self.show_theme, w=3).pack(side="left", padx=(4, 0))
+        self._mkbtn(hdr, "INFO", self.show_info, w=6,
+                    tip="About XZN").pack(side="left", padx=(10, 0))
+        self._mkbtn(hdr, "C", self.show_theme, w=3, icon="palette",
+                    tip="Color scheme  (C)").pack(side="left", padx=(4, 0))
 
-        self.btn_bg = self._mkbtn(hdr, "BG", self._bg_menu, w=4)
+        self.btn_bg = self._mkbtn(hdr, "BG", self._bg_menu, w=4,
+                                  tip="Background image  (right-click: remove)")
         self.btn_bg.pack(side="right", padx=(0, 6))
         self.btn_bg.bind("<Button-3>", lambda e: self.remove_bg())
         self.btn_bg.bind("<Button-2>", lambda e: self.remove_bg())
@@ -6335,20 +6519,27 @@ class App:
         brow = tk.Frame(self._main_frame, bg=p["PANEL"])
         brow.pack(fill="x", padx=8, pady=(0, 2))
         self._ui_brow = brow
-        self.btn_prev = self._mkbtn(brow, "|◀", self.prev_track)
+        self.btn_prev = self._mkbtn(brow, "|◀", self.prev_track, icon="prev",
+                                    tip="Previous track  (P)")
         self.btn_prev.pack(side="left")
-        self.btn_play = self._mkbtn(brow, "▶", self.toggle_play, w=5)
+        self.btn_play = self._mkbtn(brow, "▶", self.toggle_play, w=5, icon="play",
+                                    tip="Play / Pause  (Space)")
         self.btn_play.pack(side="left", padx=(2, 0))
-        self.btn_stop = self._mkbtn(brow, "■", self.stop_play)
+        self.btn_stop = self._mkbtn(brow, "■", self.stop_play, icon="stop", tip="Stop")
         self.btn_stop.pack(side="left", padx=(2, 0))
-        self.btn_next = self._mkbtn(brow, "▶|", self.next_track)
+        self.btn_next = self._mkbtn(brow, "▶|", self.next_track, icon="next",
+                                    tip="Next track  (N)")
         self.btn_next.pack(side="left", padx=(2, 0))
-        self.btn_shuf = self._mkbtn(brow, "SHUF", self.toggle_shuffle, w=6)
+        self.btn_shuf = self._mkbtn(brow, "SHUF", self.toggle_shuffle, w=6, icon="shuffle",
+                                    tip="Shuffle (random order)")
         self.btn_shuf.pack(side="right")
-        self.btn_rep = self._mkbtn(brow, "REP:OFF", self.cycle_repeat, w=9)
+        self.btn_rep = self._mkbtn(brow, "REP:OFF", self.cycle_repeat, w=9,
+                                   tip="Repeat: off / one track / whole playlist")
         self.btn_rep.pack(side="right", padx=(0, 2))
-        self._mkbtn(brow, "VIDEO", self._toggle_video_window, w=6).pack(side="right", padx=(0, 6))
-        self._mkbtn(brow, "CD", self.show_cd, w=3).pack(side="right", padx=(0, 2))
+        self._mkbtn(brow, "VIDEO", self._toggle_video_window, w=6,
+                    tip="Video window  (F: fullscreen)").pack(side="right", padx=(0, 6))
+        self._mkbtn(brow, "CD", self.show_cd, w=3,
+                    tip="Play or rip an audio CD").pack(side="right", padx=(0, 2))
 
         self.seek = tk.Scale(self._main_frame, from_=0, to=1000, orient="horizontal",
                              length=120, command=self._on_seek_cmd, bg=p["PANEL"],
@@ -6389,9 +6580,11 @@ class App:
         _bind_scale_wheel(self.bal_scale, self._on_bal_cmd,
                           lo=0, hi=100, step=5, round_to=1.0)
 
-        self.btn_eq = self._mkbtn(vrow, "EQ", self.show_equalizer, w=4)
+        self.btn_eq = self._mkbtn(vrow, "EQ", self.show_equalizer, w=4, icon="eq",
+                                  tip="Equalizer  (E)")
         self.btn_eq.pack(side="right", padx=(0, 4))
-        self.btn_mute = self._mkbtn(vrow, "MUTE", self.toggle_mute, w=6)
+        self.btn_mute = self._mkbtn(vrow, "MUTE", self.toggle_mute, w=6, icon="volume",
+                                    tip="Mute  (M)")
         self.btn_mute.pack(side="right")
 
         self.anal = tk.Canvas(self._main_frame, height=44, bg=p["SUNKEN"], highlightthickness=0)
@@ -7483,7 +7676,7 @@ class App:
     def stop_play(self):
         self.player.stop()
         self.state_lbl.config(text="■")
-        self.btn_play.config(text="▶")
+        self._set_icon(self.btn_play, "play")
         self.cur_lbl.config(text="00:00")
         self.seek.set(0)
         try:
@@ -7616,13 +7809,11 @@ class App:
     def toggle_mute(self):
         m = not self.player._mute
         self.player.set_mute(m)
-        self.btn_mute.config(fg=self.palette["ACCENT"] if m else self.palette["WHITE"],
-                             relief="sunken" if m else "raised")
+        self._set_icon(self.btn_mute, "mute" if m else "volume", m)
 
     def toggle_shuffle(self):
         self.shuffle = not self.shuffle
-        self.btn_shuf.config(fg=self.palette["ACCENT"] if self.shuffle else self.palette["WHITE"],
-                             relief="sunken" if self.shuffle else "raised")
+        self._set_icon(self.btn_shuf, "shuffle", self.shuffle)
 
     def cycle_repeat(self):
         self.repeat_mode = (self.repeat_mode + 1) % 3
@@ -7861,7 +8052,7 @@ class App:
         self._media_update(status={"playing": "Playing", "paused": "Paused"}.get(s, "Stopped"))
         glyph = {"playing": "▶", "paused": "II"}.get(s, "■")
         self.state_lbl.config(text=glyph)
-        self.btn_play.config(text="||" if s == "playing" else "▶")
+        self._set_icon(self.btn_play, "pause" if s == "playing" else "play")
 
         # Tie the animated background to the playback state:
         #   playing   → animate
