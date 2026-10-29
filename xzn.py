@@ -4212,26 +4212,47 @@ class _RawCdDrive:
     def play_path(self, track):
         return f"{CDDA_PREFIX}{self.id}/{track}"
 
+    # Errors meaning "the connection to the drive is no longer valid"
+    # (Windows re-mounted the drive, it spun down, another program
+    # accessed it ...). The cure is to reopen the drive, not to give up.
+    LOST_ERRORS = set()
+
+    def _is_lost(self, err):
+        return getattr(err, "errno", None) in self.LOST_ERRORS
+
     def read_sectors(self, lsn, count):
         """Read count audio sectors starting at lsn (thread-safe).
-        A failing block is retried once, then replaced by silence so a
-        scratch doesn't abort playback or ripping."""
+
+        - Lost connection: the drive is reopened and the read retried
+          for a few seconds (spin-up); if it never comes back, an error
+          is raised instead of producing endless silence.
+        - Real read error on a block (scratch): retried twice, then
+          replaced by silence so playback/ripping continues."""
         out = bytearray()
         pos, end = lsn, lsn + count
         with self.lock:
-            self._open()
             while pos < end:
                 n = min(self.READ_CHUNK, end - pos)
-                data = None
-                for _attempt in range(2):
+                data, err, lost_tries, bad_tries = None, None, 0, 0
+                while data is None:
                     try:
+                        self._open()
                         data = self._read_raw(pos, n)
-                        break
                     except OSError as e:
                         err = e
-                if data is None:
-                    print(f"[XZN] CD read error at sector {pos}: {err}")
-                    data = bytes(n * CD_SECTOR_BYTES)
+                        if self._is_lost(e):
+                            self._close()
+                            lost_tries += 1
+                            if lost_tries > 6:
+                                raise RuntimeError(f"CD drive {self.id} is not responding ({e})")
+                            if lost_tries == 1:
+                                print(f"[XZN] CD drive {self.id}: connection lost ({e}), reopening")
+                            time.sleep(0.25 * lost_tries)
+                        else:
+                            bad_tries += 1
+                            if bad_tries >= 3:
+                                print(f"[XZN] CD read error at sector {pos}: {err}")
+                                data = bytes(n * CD_SECTOR_BYTES)
                 out += data
                 pos += n
         return bytes(out)
@@ -4250,6 +4271,9 @@ class _RawCdDrive:
 
 class WinCdDrive(_RawCdDrive):
     kind = "windows"
+    # ERROR_INVALID_HANDLE, NOT_READY, DEV_NOT_EXIST, FILE_INVALID,
+    # DEVICE_NOT_CONNECTED, MEDIA_CHANGED
+    LOST_ERRORS = {6, 21, 55, 1006, 1167, 1110}
     IOCTL_CDROM_READ_TOC = 0x00024000
     IOCTL_CDROM_RAW_READ = 0x0002403E
     IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
@@ -4298,10 +4322,28 @@ class WinCdDrive(_RawCdDrive):
             raise OSError(k32.GetLastError(), "DeviceIoControl failed")
         return out.raw[:got.value]
 
+    def _close(self):
+        if self._h is not None:
+            try:
+                self._k32().CloseHandle(self._h)
+            except Exception:
+                _log_swallowed()
+            self._h = None
+
     def read_toc(self):
+        # Always with a fresh handle: after a disc change or a re-mount
+        # the old one is invalid (error 1006 / 55).
         with self.lock:
-            self._open()
-            raw = self._ioctl(self.IOCTL_CDROM_READ_TOC, None, 4 + 100 * 8)
+            for attempt in range(4):
+                self._close()
+                try:
+                    self._open()
+                    raw = self._ioctl(self.IOCTL_CDROM_READ_TOC, None, 4 + 100 * 8)
+                    break
+                except OSError as e:
+                    if not self._is_lost(e) or attempt == 3:
+                        raise
+                    time.sleep(0.5)
         return self.parse_toc(raw)
 
     @staticmethod
@@ -4336,8 +4378,7 @@ class WinCdDrive(_RawCdDrive):
             try:
                 self._ioctl(self.IOCTL_STORAGE_EJECT_MEDIA, None, 0)
             finally:
-                self._k32().CloseHandle(self._h)
-                self._h = None
+                self._close()
         self._toc = None
 
 
@@ -4358,6 +4399,8 @@ def _list_windows_drives():
 
 class LinuxCdDrive(_RawCdDrive):
     kind = "linux"
+    # EBADF, ENODEV, ENXIO, ENOMEDIUM
+    LOST_ERRORS = {9, 19, 6, 123}
     CDROMREADTOCHDR = 0x5305
     CDROMREADTOCENTRY = 0x5306
     CDROMREADAUDIO = 0x530E
@@ -4376,9 +4419,18 @@ class LinuxCdDrive(_RawCdDrive):
         if self._fd is None:
             self._fd = os.open(self.id, os.O_RDONLY | os.O_NONBLOCK)
 
+    def _close(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                _log_swallowed()
+            self._fd = None
+
     def read_toc(self):
         import fcntl
         with self.lock:
+            self._close()          # fresh handle after a disc change
             self._open()
             hdr = bytearray(2)
             fcntl.ioctl(self._fd, self.CDROMREADTOCHDR, hdr, True)
@@ -4413,8 +4465,7 @@ class LinuxCdDrive(_RawCdDrive):
             try:
                 fcntl.ioctl(self._fd, self.CDROMEJECT, 0)
             finally:
-                os.close(self._fd)
-                self._fd = None
+                self._close()
         self._toc = None
 
 
