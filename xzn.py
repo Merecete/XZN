@@ -3201,6 +3201,10 @@ class ThemeWindow:
         for cv, fn in ((self.hue_canvas, self._on_hue), (self.shade_canvas, self._on_shade)):
             cv.bind("<Button-1>", fn)
             cv.bind("<B1-Motion>", fn)
+        # mouse wheel moves the marker, like the other sliders
+        for cv, which in ((self.hue_canvas, "hue"), (self.shade_canvas, "shade")):
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                cv.bind(seq, lambda e, w=which: self._on_strip_wheel(e, w))
 
         crow = tk.Frame(frame, bg=p["PANEL"])
         crow.pack(fill="x", pady=(8, 0))
@@ -3276,6 +3280,25 @@ class ThemeWindow:
     def _on_shade(self, event):
         self._light = 0.06 + 0.88 * self._frac(event)
         self._draw_strips()
+
+    WHEEL_STEP = 0.01          # one wheel notch = 1 % of the strip
+
+    def _on_strip_wheel(self, event, which):
+        """Wheel up/right = marker to the right. The hue strip wraps around
+        (red is at both ends), the shade strip stops at its ends."""
+        if getattr(event, "num", None) == 4:
+            step = 1
+        elif getattr(event, "num", None) == 5:
+            step = -1
+        else:
+            step = 1 if getattr(event, "delta", 0) > 0 else -1
+        if which == "hue":
+            self._hue = (self._hue + step * self.WHEEL_STEP) % 1.0
+        else:
+            frac = (self._light - 0.06) / 0.88 + step * self.WHEEL_STEP
+            self._light = 0.06 + 0.88 * min(1.0, max(0.0, frac))
+        self._draw_strips()
+        return "break"
 
     def _pick(self, color):
         try:

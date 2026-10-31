@@ -57,6 +57,18 @@ check(tw._custom_color().lower().startswith("#a"), f"hue/shade -> {tw._custom_co
 tw._strip_w = 162
 ev = type("E", (), {"x": 81})()
 check(abs(tw._frac(ev) - 0.5031) < 0.01, "strip position -> fraction")
+tw._draw_strips = lambda: None
+tw._hue, tw._light = 0.995, 0.5
+tw._on_strip_wheel(type("E", (), {"num": 4, "delta": 0})(), "hue")
+check(abs(tw._hue - 0.005) < 1e-9, f"wheel on hue strip wraps around: {tw._hue}")
+tw._on_strip_wheel(type("E", (), {"num": None, "delta": -120})(), "hue")
+check(abs(tw._hue - 0.995) < 1e-9, "wheel down moves hue back")
+tw._light = 0.94
+tw._on_strip_wheel(type("E", (), {"num": 4, "delta": 0})(), "shade")
+check(abs(tw._light - 0.94) < 1e-9, "shade stops at the bright end")
+tw._on_strip_wheel(type("E", (), {"num": 5, "delta": 0})(), "shade")
+check(abs(tw._light - (0.94 - 0.0088)) < 1e-9, f"wheel down darkens: {tw._light}")
+
 tw.app = app
 picked = []
 app.apply_accent = lambda c, persist, rebuild: picked.append(c)
