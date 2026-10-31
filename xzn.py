@@ -210,6 +210,8 @@ VERSION = "1.1.0"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
+# Visualizer styles, cycled by clicking the visualizer
+ANALYZER_STYLES = ["Bars", "LED", "Mirror", "Peaks", "Wave"]
 
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".xzn_settings.json")
 
@@ -566,6 +568,7 @@ def load_settings():
         "sample_offered": False,
         "track_durations": {},
         "replaygain": True,
+        "viz_style": 0,
         "resume": None,
         "cd": {},
     }
@@ -609,6 +612,9 @@ def load_settings():
             rg = data.get("replaygain")
             if isinstance(rg, bool):
                 defaults["replaygain"] = rg
+            vs = data.get("viz_style")
+            if isinstance(vs, int) and vs >= 0:
+                defaults["viz_style"] = vs
             cd = data.get("cd")
             if isinstance(cd, dict):
                 defaults["cd"] = cd
@@ -634,6 +640,7 @@ def save_settings(state):
             "sample_offered": bool(state.get("sample_offered", False)),
             "track_durations": dict(state.get("track_durations") or {}),
             "replaygain": bool(state.get("replaygain", True)),
+            "viz_style": int(state.get("viz_style", 0)),
             "resume": state.get("resume"),
             "cd": dict(state.get("cd") or {}),
         }
@@ -3161,6 +3168,42 @@ class ThemeWindow:
             swatch.bind("<Button-1>", lambda e, c=color: self._pick(c))
             self.swatches.append((color, border))
 
+        # --- Custom color: hue strip + shade strip -------------------------
+        import colorsys
+        self._colorsys = colorsys
+        tk.Label(frame, text="Custom Color", font=("Helvetica", 12, "bold"),
+                 bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w", pady=(12, 4))
+        r, g, b = (v / 255 for v in hex_to_rgb(app.accent))
+        self._hue, self._light, _sat = colorsys.rgb_to_hls(r, g, b)
+        self._light = min(0.94, max(0.06, self._light))
+        self._strip_w, self._strip_h = 162, 16
+        self.hue_canvas = tk.Canvas(frame, width=self._strip_w, height=self._strip_h,
+                                    highlightthickness=1, highlightbackground=p["SUNKEN"],
+                                    bd=0, cursor="hand2")
+        self.hue_canvas.pack(anchor="w")
+        self.shade_canvas = tk.Canvas(frame, width=self._strip_w, height=self._strip_h,
+                                      highlightthickness=1, highlightbackground=p["SUNKEN"],
+                                      bd=0, cursor="hand2")
+        self.shade_canvas.pack(anchor="w", pady=(6, 0))
+        for cv, fn in ((self.hue_canvas, self._on_hue), (self.shade_canvas, self._on_shade)):
+            cv.bind("<Button-1>", fn)
+            cv.bind("<B1-Motion>", fn)
+
+        crow = tk.Frame(frame, bg=p["PANEL"])
+        crow.pack(fill="x", pady=(8, 0))
+        is_custom = app.accent.lower() not in {c.lower() for _n, c in PRESET_COLORS}
+        self.custom_border = tk.Frame(crow, bg=p["ACCENT"] if is_custom else p["SUNKEN"], padx=2, pady=2)
+        self.custom_border.pack(side="left")
+        self.preview = tk.Canvas(self.custom_border, width=42, height=24, highlightthickness=0, bd=0)
+        self.preview.pack()
+        self.hex_lbl = tk.Label(crow, text="", font=("Courier New", 10, "bold"),
+                                bg=p["PANEL"], fg=p["GRAY"])
+        self.hex_lbl.pack(side="left", padx=(8, 0))
+        make_flat_button(crow, "Apply", lambda: self._pick(self._custom_color()),
+                         palette=p, padx=10, pady=3).pack(side="right")
+        self._strip_images = {}
+        self._draw_strips()
+
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(fill="x", pady=(14, 0))
 
@@ -3176,6 +3219,51 @@ class ThemeWindow:
         h = self.win.winfo_height()
         self.win.geometry(f"+{mx - w // 2}+{my - h // 2}")
         self.win.bind("<Escape>", lambda e: self.win.destroy())
+
+    # --- custom color helpers -------------------------------------------
+    def _custom_color(self, hue=None, light=None):
+        h = self._hue if hue is None else hue
+        l = self._light if light is None else light
+        r, g, b = self._colorsys.hls_to_rgb(h, l, 1.0)
+        return rgb_to_hex((int(r * 255), int(g * 255), int(b * 255)))
+
+    def _strip_photo(self, key, colors):
+        img = Image.new("RGB", (self._strip_w, self._strip_h))
+        d = ImageDraw.Draw(img)
+        for x, c in enumerate(colors):
+            d.line([(x, 0), (x, self._strip_h)], fill=c)
+        photo = ImageTk.PhotoImage(img)
+        self._strip_images[key] = photo          # keep a reference
+        return photo
+
+    def _marker(self, cv, frac):
+        x = int(frac * (self._strip_w - 1))
+        cv.create_rectangle(x - 2, 0, x + 2, self._strip_h, outline="#000000", width=1)
+        cv.create_rectangle(x - 1, 1, x + 1, self._strip_h - 1, outline="#ffffff", width=1)
+
+    def _draw_strips(self):
+        w = self._strip_w
+        hues = [self._custom_color(hue=x / (w - 1), light=0.6) for x in range(w)]
+        shades = [self._custom_color(light=0.06 + 0.88 * x / (w - 1)) for x in range(w)]
+        for cv, key, cols, frac in ((self.hue_canvas, "hue", hues, self._hue),
+                                    (self.shade_canvas, "shade", shades, (self._light - 0.06) / 0.88)):
+            cv.delete("all")
+            cv.create_image(0, 0, anchor="nw", image=self._strip_photo(key, cols))
+            self._marker(cv, frac)
+        color = self._custom_color()
+        self.preview.config(bg=color)
+        self.hex_lbl.config(text=color.upper())
+
+    def _frac(self, event):
+        return min(1.0, max(0.0, event.x / float(self._strip_w - 1)))
+
+    def _on_hue(self, event):
+        self._hue = self._frac(event)
+        self._draw_strips()
+
+    def _on_shade(self, event):
+        self._light = 0.06 + 0.88 * self._frac(event)
+        self._draw_strips()
 
     def _pick(self, color):
         try:
@@ -5743,6 +5831,7 @@ class App:
         self._eq_preamp = float(settings.get("eq_preamp") or 0.0)
         self._sample_offered = bool(settings.get("sample_offered", False))
         self._replaygain = bool(settings.get("replaygain", True))
+        self._viz_style = int(settings.get("viz_style", 0)) % len(ANALYZER_STYLES)
         self._saved_resume = settings.get("resume")
         self._cd_settings = dict(settings.get("cd") or {})
         self._cd_win = None
@@ -5782,6 +5871,9 @@ class App:
         self._seek_wheel_active = False
         self._seek_wheel_timer = None
         self._auto_gain = 1.0
+        self._wave_gain = 0.05
+        self._viz_peaks = np.zeros(ANALYZER_BARS, dtype=np.float32)
+        self._viz_label_until = 0.0
         self._bg_photo = None
         self._hero_size = (0, 0)
         self._hero_resize_job = None
@@ -6127,6 +6219,7 @@ class App:
             "track_durations": {k: v for k, v in (getattr(self, "_track_durations", {}) or {}).items()
                                 if not is_cdda(k)},
             "replaygain": bool(getattr(self, "_replaygain", True)),
+            "viz_style": int(getattr(self, "_viz_style", 0)),
             "resume": self._resume_state(),
             "cd": dict(getattr(self, "_cd_settings", {}) or {}),
         })
@@ -6652,8 +6745,11 @@ class App:
                                     tip="Mute  (M)")
         self.btn_mute.pack(side="right")
 
-        self.anal = tk.Canvas(self._main_frame, height=44, bg=p["SUNKEN"], highlightthickness=0)
+        self.anal = tk.Canvas(self._main_frame, height=44, bg=p["SUNKEN"], highlightthickness=0,
+                              cursor="hand2")
         self.anal.pack(fill="x", padx=8, pady=(0, 4))
+        self.anal.bind("<Button-1>", self._next_viz)
+        Tooltip(self.anal, "Click: next visualizer style", p)
 
         plf = tk.Frame(self._main_frame, bg=p["PANEL"])
         plf.pack(fill="both", expand=True, padx=8, pady=(0, 4))
@@ -8263,6 +8359,13 @@ class App:
         except Exception as e:
             print(f"[XZN] _update_video error: {e}")
 
+    def _next_viz(self, event=None):
+        """Click on the visualizer: switch to the next style (saved)."""
+        self._viz_style = (self._viz_style + 1) % len(ANALYZER_STYLES)
+        self._viz_peaks[:] = 0
+        self._viz_label_until = time.monotonic() + 1.2
+        self._persist_settings()
+
     def _update_analyzer(self):
         p = self.player
         with p.spec_lock:
@@ -8277,8 +8380,10 @@ class App:
             seg = np.concatenate([buf[start:], buf[:(start + m) % n]])
         c = self.anal
         pal = self.palette
+        style = ANALYZER_STYLES[self._viz_style % len(ANALYZER_STYLES)]
+        playing = p.state == "playing" and len(seg)
         h = np.zeros(ANALYZER_BARS, dtype=np.float32)
-        if p.state == "playing" and len(seg):
+        if playing and style != "Wave":
             try:
                 spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
                 freqs = np.fft.rfftfreq(len(seg), 1 / SAMPLE_RATE)
@@ -8298,11 +8403,64 @@ class App:
             w = VIDEO_W
         hh = 44
         bw = max(1, w // ANALYZER_BARS)
-        for i in range(ANALYZER_BARS):
-            hpx = max(1, int(h[i] * (hh - 4)))
-            x0 = i * bw + 1
-            c.create_rectangle(x0, hh - 2 - hpx, x0 + bw - 3, hh - 2,
-                               fill=pal["ACCENT"] if h[i] > 0.5 else pal["ACCENT_LO"], width=0)
+        hi, lo = pal["ACCENT"], pal["ACCENT_LO"]
+
+        if style == "Bars":
+            for i in range(ANALYZER_BARS):
+                hpx = max(1, int(h[i] * (hh - 4)))
+                x0 = i * bw + 1
+                c.create_rectangle(x0, hh - 2 - hpx, x0 + bw - 3, hh - 2,
+                                   fill=hi if h[i] > 0.5 else lo, width=0)
+
+        elif style == "LED":
+            # retro VU meter: stacked segments, the top ones light up brighter
+            seg_h, gap = 4, 1
+            rows = (hh - 4) // (seg_h + gap)
+            for i in range(ANALYZER_BARS):
+                lit = int(round(h[i] * rows))
+                x0 = i * bw + 1
+                for r in range(max(1, lit)):
+                    y1 = hh - 2 - r * (seg_h + gap)
+                    c.create_rectangle(x0, y1 - seg_h, x0 + bw - 3, y1,
+                                       fill=hi if r >= rows * 0.6 else lo, width=0)
+
+        elif style == "Mirror":
+            mid = hh / 2
+            for i in range(ANALYZER_BARS):
+                half = max(1, int(h[i] * (mid - 2)))
+                x0 = i * bw + 1
+                c.create_rectangle(x0, mid - half, x0 + bw - 3, mid + half,
+                                   fill=hi if h[i] > 0.5 else lo, width=0)
+
+        elif style == "Peaks":
+            # bars with caps that hold the peak and slowly fall back
+            self._viz_peaks = np.maximum(h, self._viz_peaks - 0.015)
+            for i in range(ANALYZER_BARS):
+                hpx = max(1, int(h[i] * (hh - 6)))
+                x0 = i * bw + 1
+                c.create_rectangle(x0, hh - 2 - hpx, x0 + bw - 3, hh - 2, fill=lo, width=0)
+                py = hh - 2 - int(self._viz_peaks[i] * (hh - 6)) - 3
+                c.create_rectangle(x0, py, x0 + bw - 3, py + 2, fill=hi, width=0)
+
+        else:   # "Wave": oscilloscope of the last few milliseconds
+            mid = hh / 2
+            pts = []
+            if playing:
+                wave = seg[-1024:]
+                peak = float(np.abs(wave).max()) + 1e-6
+                self._wave_gain = max(peak, self._wave_gain * 0.97)
+                step = max(1, len(wave) // max(2, w // 2))
+                ys = wave[::step] / self._wave_gain
+                xs = np.linspace(0, w, len(ys))
+                for x, y in zip(xs, ys):
+                    pts += [float(x), float(mid - y * (mid - 3))]
+            if len(pts) < 4:
+                pts = [0, mid, w, mid]
+            c.create_line(*pts, fill=hi, width=2)
+
+        if time.monotonic() < self._viz_label_until:
+            c.create_text(w - 6, 4, anchor="ne", text=style.upper(), fill=pal["WHITE"],
+                          font=("Courier New", 9, "bold"))
 
     # --- Shutdown --------------------------------------------------------
     def on_close(self):
