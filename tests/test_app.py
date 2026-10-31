@@ -77,6 +77,17 @@ check(app.root.geometry.call_args.args == ("640x160",), f"mini size = layout req
 app.toggle_mini(); check(not app._mini, "mini off")
 check(app.root.geometry.call_args.args == ("760x780+10+10",), f"full size restored {app.root.geometry.call_args}")
 
+# full window: opens at 640 wide, can be made narrower down to the layout width
+app._main_frame.winfo_reqwidth.return_value = 540
+app._main_frame.winfo_reqheight.return_value = 600
+app._fit_full_window()
+check(app.root.minsize.call_args.args == (540, 700) and app.root.geometry.call_args.args == ("640x700",),
+      f"min width = layout width, start at 640x700 {app.root.minsize.call_args} {app.root.geometry.call_args}")
+app._main_frame.winfo_reqwidth.return_value = 700
+app._fit_full_window()
+check(app.root.minsize.call_args.args == (700, 700) and app.root.geometry.call_args.args == ("700x700",),
+      "wider layout opens wider")
+
 # media keys dispatch
 app.player.state = "playing"
 with mock.patch.object(app, "toggle_play") as tp, mock.patch.object(app, "next_track") as nt:

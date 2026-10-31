@@ -6812,7 +6812,7 @@ class App:
         self._mkbtn(pbtns, "CLEAR",      self.clear_playlist,    w=6).pack(side="right", padx=(0, 4))
 
         self._mkbtn(pbtns, "▲", self.move_up,   w=3).pack(side="left", padx=(6, 0))
-        self._mkbtn(pbtns, "▼", self.move_down, w=3).pack(side="left", padx=(2, 0))
+        self._mkbtn(pbtns, "▼", self.move_down, w=3).pack(side="left", padx=(2, 4))
 
         srow = tk.Frame(self._main_frame, bg=p["PANEL"])
         srow.pack(fill="x", side="bottom")
@@ -6847,15 +6847,16 @@ class App:
             _log_swallowed()
 
     def _fit_full_window(self):
-        """Open the full player at the smallest size its layout needs
-        (never below the classic 640x700 minimum)."""
+        """Open the full player at the classic 640x700 (or larger if the
+        layout needs it). It can be made narrower down to the width where
+        every control still fits, e.g. the playlist arrows next to CLEAR."""
         try:
             self.root.update_idletasks()
-            w = max(640, self._main_frame.winfo_reqwidth())
+            min_w = self._main_frame.winfo_reqwidth()
             h = max(700, self._main_frame.winfo_reqheight())
-            self._full_minsize = (w, h)
-            self.root.minsize(w, h)
-            self.root.geometry(f"{w}x{h}")
+            self._full_minsize = (min_w, h)
+            self.root.minsize(min_w, h)
+            self.root.geometry(f"{max(640, min_w)}x{h}")
         except Exception:
             _log_swallowed()
 
