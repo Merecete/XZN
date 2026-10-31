@@ -3212,16 +3212,15 @@ class ThemeWindow:
         self.hex_lbl = tk.Label(crow, text="", font=("Courier New", 10, "bold"),
                                 bg=p["PANEL"], fg=p["GRAY"])
         self.hex_lbl.pack(side="left", padx=(8, 0))
-        make_flat_button(crow, "Apply", lambda: self._pick(self._custom_color()),
-                         palette=p, padx=10, pady=3).pack(side="right")
         self._strip_images = {}
         self._draw_strips()
 
         btn_row = tk.Frame(frame, bg=p["PANEL"])
         btn_row.pack(fill="x", pady=(14, 0))
 
-        make_flat_button(btn_row, "Default (Purple)", self._reset, palette=p,
-                         padx=10, pady=4).pack(side="left")
+        # Apply sets the custom color; the default theme is the first preset.
+        make_flat_button(btn_row, "Apply", lambda: self._pick(self._custom_color()),
+                         palette=p, padx=10, pady=4).pack(side="left")
         make_flat_button(btn_row, "Close", self.win.destroy, palette=p,
                          padx=10, pady=4).pack(side="right")
 
@@ -3284,14 +3283,6 @@ class ThemeWindow:
         except Exception:
             _log_swallowed()
         self.app.apply_accent(color, persist=True, rebuild=True)
-
-    def _reset(self):
-        try:
-            self.win.destroy()
-        except Exception:
-            _log_swallowed()
-        self.app.apply_accent(DEFAULT_PALETTE["ACCENT"], persist=True, rebuild=True)
-
 
 # ------------------------------------------------------------------------
 # ------------------------------------------------------------------------
