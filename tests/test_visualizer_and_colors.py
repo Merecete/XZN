@@ -64,5 +64,14 @@ tw.win = app.root
 tw._pick(tw._custom_color())
 check(picked and picked[0] == tw._custom_color(), "Apply sets the custom color as accent")
 
+# palette: saturated custom colors stay accents, only neutral ones switch the look
+pal = xzn.build_palette("#e1fe0e")
+check(pal["ACCENT"] == "#e1fe0e" and pal["WHITE"] != "#1a1a2a", "bright yellow stays a yellow accent (no light theme)")
+check(xzn.build_palette("#dfe3f0")["WHITE"] == "#1a1a2a", "white preset still gives the light theme")
+check(xzn.build_palette("#101018")["ACCENT"] == "#e8e6f0", "black preset still gives the dark theme")
+check(xzn.luminance(xzn.build_palette("#1020a0")["ACCENT"]) >= 0.28, "very dark custom color is brightened for readability")
+check(all(xzn.build_palette(c)["ACCENT"] == c for n, c in xzn.PRESET_COLORS if n not in ("Black", "White")),
+      "preset colors unchanged")
+
 print("ALL PASS" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

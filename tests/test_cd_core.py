@@ -185,6 +185,5 @@ with mock.patch.object(xzn.os, "listdir", side_effect=lambda p: ["Macintosh HD",
     found = xzn._list_mac_drives()
 check([x.id for x in found] == ["/Volumes/Audio CD"], "macOS detects the mounted audio CD")
 
-check(xzn.VERSION == "1.1.0", "version 1.1.0")
 print("ALL PASS" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

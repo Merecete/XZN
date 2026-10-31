@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.1.0
+Xenon-Zones (XZN) v1.1.1
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -206,7 +206,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -509,9 +509,16 @@ def build_palette(accent_hex):
     base_bg = DEFAULT_PALETTE["BG"]
     base_panel = DEFAULT_PALETTE["PANEL"]
     lum = luminance(accent_hex)
+    # Only near-neutral colors switch the whole look: black-ish -> dark
+    # theme with white accents, white-ish -> light theme. Saturated colors
+    # (a bright yellow, a deep blue ...) stay accent colors.
+    import colorsys
+    r, g, b = (v / 255.0 for v in hex_to_rgb(accent_hex))
+    _h, light, sat = colorsys.rgb_to_hls(r, g, b)
+    neutral = sat < 0.5 or light < 0.08 or light > 0.95
 
-    is_dark = lum < 0.15
-    is_light = lum > 0.85
+    is_dark = lum < 0.15 and neutral
+    is_light = lum > 0.85 and neutral
 
     if is_dark:
         bg_base      = base_bg
@@ -538,6 +545,12 @@ def build_palette(accent_hex):
         raised_base  = mix(base_panel, tint, 0.26)
         sunken_base  = darken(mix(base_bg, tint, 0.03), 0.70)
         accent       = accent_hex
+        # very dark accent colors would be unreadable on the dark panels:
+        # brighten them just enough, keeping the hue
+        for _ in range(12):
+            if luminance(accent) >= 0.28:
+                break
+            accent = lighten(accent, 0.15)
         accent_hi    = lighten(accent, 0.45)
         accent_lo    = darken(accent, 0.62)
 
