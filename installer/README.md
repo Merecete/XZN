@@ -6,7 +6,7 @@ in `release/`, already named for the GitHub release.
 | Platform | Command | Result |
 |---|---|---|
 | Windows | `installer\build_windows.bat` | `XZN_Setup_v<ver>.exe` |
-| Linux | `sh installer/build_unix.sh` | `XZN-Linux-x86_64_v<ver>.deb`, `XZN-Linux-x86_64_v<ver>.tar.xz` |
+| Linux | `sh installer/build_unix.sh` | `XZN-Linux-x86_64_v<ver>.deb`, `.AppImage`, `.tar.xz` |
 | macOS | `sh installer/build_unix.sh` | `XZN-macOS-arm_64_v<ver>.zip` (contains the .dmg) |
 
 All build files live in this folder: the PyInstaller spec (`xzn.spec`),
@@ -37,6 +37,11 @@ Install the result with `sudo apt install ./release/XZN-Linux-x86_64_v<ver>.deb`
 (apt pulls in PortAudio). The package installs to `/opt/xzn`, adds a
 menu entry, "Open with" support for audio/video files and the command
 `xzn`. Remove with `sudo apt remove xzn`.
+
+The AppImage runs on most distributions without installing:
+`chmod +x XZN-Linux-x86_64_v<ver>.AppImage`, then start it. It can also be
+built on its own with `sh installer/build_appimage.sh <version>` (after
+the PyInstaller build); `appimagetool` is downloaded automatically.
 
 Reading audio CDs needs access to the drive (`/dev/sr0`); desktop
 sessions normally grant that, otherwise add the user to the `cdrom` group.

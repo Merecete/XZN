@@ -3,8 +3,9 @@
 #  Builds XZN on Linux or macOS and packages it.
 #  Run from anywhere:   sh installer/build_unix.sh
 #
-#  Linux  -> release/XZN-Linux-x86_64_v<ver>.deb    (Debian/Ubuntu)
-#            release/XZN-Linux-x86_64_v<ver>.tar.xz (other distributions)
+#  Linux  -> release/XZN-Linux-x86_64_v<ver>.deb      (Debian/Ubuntu)
+#            release/XZN-Linux-x86_64_v<ver>.AppImage (any distribution)
+#            release/XZN-Linux-x86_64_v<ver>.tar.xz   (plain archive)
 #  macOS  -> release/XZN-macOS-arm_64_v<ver>.zip    (contains the .dmg)
 #
 #  Needs (Linux, Debian/Ubuntu):
@@ -40,6 +41,7 @@ if [ "$OS" = "Darwin" ]; then
     sh installer/build_dmg.sh "$VER"
 else
     sh installer/build_deb.sh "$VER"
+    sh installer/build_appimage.sh "$VER"
     ARCH="$(uname -m)"
     tar -C dist -cJf "release/XZN-Linux-${ARCH}_v${VER}.tar.xz" XZN
     echo "Built: release/XZN-Linux-${ARCH}_v${VER}.tar.xz"
