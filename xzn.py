@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.1.1
+Xenon-Zones (XZN) v1.1.2
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -206,7 +206,7 @@ except Exception:
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -582,6 +582,7 @@ def load_settings():
         "track_durations": {},
         "replaygain": True,
         "viz_style": 0,
+        "playlist_hidden": False,
         "resume": None,
         "cd": {},
     }
@@ -628,6 +629,9 @@ def load_settings():
             vs = data.get("viz_style")
             if isinstance(vs, int) and vs >= 0:
                 defaults["viz_style"] = vs
+            ph = data.get("playlist_hidden")
+            if isinstance(ph, bool):
+                defaults["playlist_hidden"] = ph
             cd = data.get("cd")
             if isinstance(cd, dict):
                 defaults["cd"] = cd
@@ -654,6 +658,7 @@ def save_settings(state):
             "track_durations": dict(state.get("track_durations") or {}),
             "replaygain": bool(state.get("replaygain", True)),
             "viz_style": int(state.get("viz_style", 0)),
+            "playlist_hidden": bool(state.get("playlist_hidden", False)),
             "resume": state.get("resume"),
             "cd": dict(state.get("cd") or {}),
         }
@@ -5859,6 +5864,8 @@ class App:
         self._sample_offered = bool(settings.get("sample_offered", False))
         self._replaygain = bool(settings.get("replaygain", True))
         self._viz_style = int(settings.get("viz_style", 0)) % len(ANALYZER_STYLES)
+        self._pl_hidden = bool(settings.get("playlist_hidden", False))
+        self._pl_open_height = None      # window height before hiding the playlist
         self._saved_resume = settings.get("resume")
         self._cd_settings = dict(settings.get("cd") or {})
         self._cd_win = None
@@ -6247,6 +6254,7 @@ class App:
                                 if not is_cdda(k)},
             "replaygain": bool(getattr(self, "_replaygain", True)),
             "viz_style": int(getattr(self, "_viz_style", 0)),
+            "playlist_hidden": bool(getattr(self, "_pl_hidden", False)),
             "resume": self._resume_state(),
             "cd": dict(getattr(self, "_cd_settings", {}) or {}),
         })
@@ -6781,11 +6789,18 @@ class App:
         plf = tk.Frame(self._main_frame, bg=p["PANEL"])
         plf.pack(fill="both", expand=True, padx=8, pady=(0, 4))
         self._ui_plf = plf
-        top = tk.Frame(plf, bg=p["PANEL"])
+        # Header: click it to hide / show the playlist.
+        top = tk.Frame(plf, bg=p["PANEL"], cursor="hand2")
         top.pack(fill="x")
-        tk.Label(top, text="PLAYLIST", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
-        self.pl_count = tk.Label(top, text="", font=FONT_UI, bg=p["PANEL"], fg=p["ACCENT_LO"])
+        self.pl_title = tk.Label(top, text="", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"],
+                                 cursor="hand2")
+        self.pl_title.pack(side="left")
+        self.pl_count = tk.Label(top, text="", font=FONT_UI, bg=p["PANEL"], fg=p["ACCENT_LO"],
+                                 cursor="hand2")
         self.pl_count.pack(side="right")
+        for w in (top, self.pl_title, self.pl_count):
+            w.bind("<Button-1>", lambda e: self.toggle_playlist())
+        Tooltip(top, lambda: "Click: show playlist" if self._pl_hidden else "Click: hide playlist", p)
 
         lrow = tk.Frame(plf, bg=p["SUNKEN"])
         lrow.pack(fill="both", expand=True, pady=(2, 4))
@@ -6827,13 +6842,18 @@ class App:
 
         self._mkbtn(pbtns, "▲", self.move_up,   w=3).pack(side="left", padx=(6, 0))
         self._mkbtn(pbtns, "▼", self.move_down, w=3).pack(side="left", padx=(2, 4))
+        self._ui_pbtns = pbtns
 
         srow = tk.Frame(self._main_frame, bg=p["PANEL"])
         srow.pack(fill="x", side="bottom")
-        self.status_left = tk.Label(srow, text="Ready — add files to begin.",
+        # width=1: a long status text must not make the window wider; the
+        # label just shows as much as fits.
+        self.status_left = tk.Label(srow, text="Ready — add files to begin.", width=1,
                                     font=FONT_UI, bg=p["PANEL"], fg=p["GRAY"], anchor="w")
         self.status_left.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=4)
         self._ui_srow = srow
+
+        self._apply_playlist_hidden()
 
         # Remember the full layout so mini mode can restore it exactly.
         self._ui_pack_order = []
@@ -6860,19 +6880,55 @@ class App:
         except Exception:
             _log_swallowed()
 
-    def _fit_full_window(self):
-        """Open the full player at the classic 640x700 (or larger if the
-        layout needs it). It can be made narrower down to the width where
-        every control still fits, e.g. the playlist arrows next to CLEAR."""
+    def _fit_full_window(self, keep_width=False, height=None):
+        """Size the full player to the smallest width where every control
+        still fits (the playlist arrows right next to CLEAR). With the
+        playlist hidden the window is exactly as high as the controls and
+        can only be resized sideways."""
         try:
             self.root.update_idletasks()
             min_w = self._main_frame.winfo_reqwidth()
-            h = max(700, self._main_frame.winfo_reqheight())
-            self._full_minsize = (min_w, h)
-            self.root.minsize(min_w, h)
-            self.root.geometry(f"{max(640, min_w)}x{h}")
+            req_h = self._main_frame.winfo_reqheight()
+            min_h = req_h if self._pl_hidden else max(700, req_h)
+            self._full_minsize = (min_w, min_h)
+            self.root.minsize(min_w, min_h)
+            self.root.resizable(True, not self._pl_hidden)
+            w = max(min_w, self.root.winfo_width()) if keep_width else min_w
+            h = min_h if self._pl_hidden else max(min_h, height or 0)
+            self.root.geometry(f"{w}x{h}")
         except Exception:
             _log_swallowed()
+
+    def _apply_playlist_hidden(self):
+        """Show or hide the list and its buttons; the header stays."""
+        hidden = self._pl_hidden
+        self.pl_title.config(text=("▸ " if hidden else "▾ ") + "PLAYLIST")
+        if hidden:
+            self._ui_lrow.pack_forget()
+            self._ui_pbtns.pack_forget()
+            self._ui_plf.pack_configure(fill="x", expand=False)
+        else:
+            self._ui_lrow.pack(fill="both", expand=True, pady=(2, 4))
+            self._ui_pbtns.pack(fill="x")
+            self._ui_plf.pack_configure(fill="both", expand=True)
+        # keep mini mode's saved layout in step
+        for i, (w, info) in enumerate(getattr(self, "_ui_pack_order", [])):
+            if w is self._ui_plf:
+                info = dict(info, fill="x" if hidden else "both", expand=not hidden)
+                self._ui_pack_order[i] = (w, info)
+
+    def toggle_playlist(self):
+        if self._mini:
+            return
+        if not self._pl_hidden:
+            try:
+                self._pl_open_height = self.root.winfo_height()
+            except Exception:
+                self._pl_open_height = None
+        self._pl_hidden = not self._pl_hidden
+        self._apply_playlist_hidden()
+        self._fit_full_window(keep_width=True, height=self._pl_open_height)
+        self._persist_settings()
 
     def toggle_mini(self):
         self._set_mini(not self._mini)
@@ -6909,7 +6965,7 @@ class App:
             for w, info in self._ui_pack_order:
                 w.pack(**info)
             self._mini = False
-            self.root.resizable(True, True)
+            self.root.resizable(True, not self._pl_hidden)
             self.root.minsize(*self._full_minsize)
             if resize and self._full_geometry:
                 self.root.geometry(self._full_geometry)

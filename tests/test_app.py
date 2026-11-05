@@ -77,16 +77,36 @@ check(app.root.geometry.call_args.args == ("640x160",), f"mini size = layout req
 app.toggle_mini(); check(not app._mini, "mini off")
 check(app.root.geometry.call_args.args == ("760x780+10+10",), f"full size restored {app.root.geometry.call_args}")
 
-# full window: opens at 640 wide, can be made narrower down to the layout width
+# full window: opens at the smallest width where all controls fit
 app._main_frame.winfo_reqwidth.return_value = 540
 app._main_frame.winfo_reqheight.return_value = 600
+app._pl_hidden = False
 app._fit_full_window()
-check(app.root.minsize.call_args.args == (540, 700) and app.root.geometry.call_args.args == ("640x700",),
-      f"min width = layout width, start at 640x700 {app.root.minsize.call_args} {app.root.geometry.call_args}")
-app._main_frame.winfo_reqwidth.return_value = 700
-app._fit_full_window()
-check(app.root.minsize.call_args.args == (700, 700) and app.root.geometry.call_args.args == ("700x700",),
-      "wider layout opens wider")
+check(app.root.minsize.call_args.args == (540, 700) and app.root.geometry.call_args.args == ("540x700",),
+      f"opens at layout width {app.root.minsize.call_args} {app.root.geometry.call_args}")
+
+st = [c for c in xzn.tk.Label.call_args_list if str(c.kwargs.get("text", "")).startswith("Ready")]
+check(st and st[-1].kwargs.get("width") == 1, "long status text cannot widen the window")
+
+# clicking the playlist header hides / shows the playlist
+app.root.winfo_width.return_value = 800
+app.root.winfo_height.return_value = 900
+app._mini = False
+app._main_frame.winfo_reqheight.return_value = 380   # without the list
+app.toggle_playlist()
+check(app._pl_hidden and app.pl_title.config.call_args.kwargs["text"] == "▸ PLAYLIST", "header click hides the playlist")
+check(app.root.geometry.call_args.args == ("800x380",) and app.root.minsize.call_args.args == (540, 380)
+      and app.root.resizable.call_args.args == (True, False),
+      f"window shrinks to the controls, keeps its width {app.root.geometry.call_args}")
+import json as _json
+check(_json.load(open(xzn.SETTINGS_PATH))["playlist_hidden"] is True, "hidden playlist is remembered")
+app._main_frame.winfo_reqheight.return_value = 600
+app.toggle_playlist()
+check(not app._pl_hidden and app.pl_title.config.call_args.kwargs["text"] == "▾ PLAYLIST"
+      and app.root.geometry.call_args.args == ("800x900",) and app.root.resizable.call_args.args == (True, True),
+      f"second click shows it again at the old height {app.root.geometry.call_args}")
+plf_info = [i for w, i in app._ui_pack_order if w is app._ui_plf]
+check(not plf_info or plf_info[-1]["expand"] is True, "mini mode restores the playlist layout")
 
 # media keys dispatch
 app.player.state = "playing"
