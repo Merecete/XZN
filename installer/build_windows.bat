@@ -22,6 +22,7 @@ echo.
 echo === Building XZN %VER% ===
 
 pyinstaller --noconfirm --clean installer\xzn.spec || goto :fail
+python installer\wizard_images.py build\wizard || goto :fail
 
 rem --- Inno Setup ------------------------------------------------------
 set ISCC=

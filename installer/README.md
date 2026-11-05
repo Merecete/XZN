@@ -27,6 +27,9 @@ that come with PyAV.
 - [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the setup program
   (without it you still get the program in `dist\`)
 
+The XZN logo on the setup pages is made from `xzn-logo.png` by
+`wizard_images.py` during the build (into `build\wizard\`).
+
 ## Linux
 
 ```

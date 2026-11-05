@@ -48,6 +48,12 @@ UninstallDisplayName={#MyAppName} {#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+; XZN logo in the setup pages (made by installer\wizard_images.py,
+; one image per display scaling). Without them the default images are used.
+#if FileExists(AddBackslash(SourcePath) + "..\build\wizard\large_100.bmp")
+WizardImageFile=..\build\wizard\large_100.bmp,..\build\wizard\large_125.bmp,..\build\wizard\large_150.bmp,..\build\wizard\large_175.bmp,..\build\wizard\large_200.bmp,..\build\wizard\large_225.bmp,..\build\wizard\large_250.bmp
+WizardSmallImageFile=..\build\wizard\small_100.bmp,..\build\wizard\small_125.bmp,..\build\wizard\small_150.bmp,..\build\wizard\small_175.bmp,..\build\wizard\small_200.bmp,..\build\wizard\small_225.bmp,..\build\wizard\small_250.bmp
+#endif
 
 PrivilegesRequired=admin
 MinVersion=10.0
