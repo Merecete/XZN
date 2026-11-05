@@ -1,6 +1,6 @@
 # Xenon-Zones (XZN)
 
-Xenon-Zones (XZN) is an all in one, cross-platform media player for Windows, Linux and macOS. Built with a focus on low resource consumption and a clean user experience, it is ideal for laptops, VMs and minimal setups. XZN stands out with its customizable cyberpunk interface and animated backgrounds, and it plays and rips audio CDs without any additional software.
+Xenon-Zones (XZN) is an all-in-one media player for Windows, Linux and macOS: it plays audio and video, and plays and rips audio CDs without any additional software. Everything is built in, equalizer, ReplayGain, tag editor, playlist, no plugins and no external tools to install.
 
 ## Screenshots
 
