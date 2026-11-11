@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.1.2
+Xenon-Zones (XZN) v1.1.3
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -197,16 +197,38 @@ except Exception:
 # --- Optional: fast EQ filtering ----------------------------------------
 # scipy's sosfilt runs the biquad cascade in C. Without scipy the
 # equalizer falls back to the (much slower) pure-Python loop.
-try:
-    from scipy.signal import sosfilt as _sosfilt  # type: ignore
-    _SCIPY_AVAILABLE = True
-except Exception:
-    _sosfilt = None  # type: ignore
-    _SCIPY_AVAILABLE = False
+# scipy takes a while to load (especially on Windows, where the virus
+# scanner checks each of its files), so it is loaded in the background
+# while the window is being built. Until it is ready the equalizer passes
+# the sound through unchanged; that is only the first moment after start.
+_sosfilt = None  # type: ignore
+_SCIPY_AVAILABLE = False
+_scipy_ready = threading.Event()
+
+
+def _load_scipy():
+    global _sosfilt, _SCIPY_AVAILABLE
+    try:
+        from scipy.signal import sosfilt  # type: ignore
+        _sosfilt = sosfilt
+        _SCIPY_AVAILABLE = True
+    except Exception:
+        pass
+    finally:
+        _scipy_ready.set()
+
+
+def ensure_scipy():
+    """Wait until the background load of scipy has finished."""
+    _scipy_ready.wait()
+    return _SCIPY_AVAILABLE
+
+
+threading.Thread(target=_load_scipy, name="xzn-scipy", daemon=True).start()
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -779,7 +801,32 @@ def load_background_frames(w, h, palette, custom_path=None):
     return ([_make_gradient_bg(w, h, palette)], [0], False)
 
 
-def _load_bg_file(path, w, h, palette):
+def find_background_file(custom_path=None):
+    """Path of the background image that would be used, or None."""
+    names = ("bg.png", "bg.jpg", "bg.jpeg", "bg.gif", "bg.webp",
+             "background.png", "background.jpg", "background.gif", "background.webp")
+    candidates = [custom_path] if custom_path else []
+    for name in names:
+        candidates += [resource_path(name), os.path.join(os.getcwd(), name),
+                       os.path.join(SCRIPT_DIR, name)]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def load_background_preview(path, w, h, palette):
+    """Fast first look at a background: (first frame, is_animated).
+
+    Only the first frame is decoded, so even a big animated GIF shows up
+    at once; the other frames are loaded in the background."""
+    with Image.open(path) as im:
+        animated = (os.path.splitext(path)[1].lower() in (".gif", ".webp")
+                    and getattr(im, "n_frames", 1) > 1)
+        return _process_bg_frame(_prepare_rgb_frame(im, palette), w, h, palette), animated
+
+
+def _load_bg_file(path, w, h, palette, cancelled=None):
     """Load one background file; returns (frames, durations, animated)."""
     ext = os.path.splitext(path)[1].lower()
 
@@ -793,6 +840,8 @@ def _load_bg_file(path, w, h, palette):
                 frames = []
                 durations = []
                 for frame in ImageSequence.Iterator(im):
+                    if cancelled is not None and cancelled():
+                        return None          # window size changed meanwhile
                     # Read the per-frame duration BEFORE moving on.
                     try:
                         dur = frame.info.get("duration", 100)
@@ -1218,6 +1267,8 @@ class Equalizer:
         with self.lock:
             if not self.enabled:
                 return
+            if not _scipy_ready.is_set():
+                return                       # still loading: sound unchanged
             pre = 10.0 ** (self.preamp / 20.0)
             if pre != 1.0:
                 block *= pre
@@ -4193,6 +4244,7 @@ CDDA_PREFIX = "cdda://"
 
 MB_LEAD_IN = 150
 MB_USER_AGENT = f"XZN/{VERSION} ( https://github.com/Merecete/XZN )"
+MB_MAX_RESPONSE = 5 * 1024 * 1024
 MB_URL = "https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc}&inc=recordings+artist-credits&fmt=json"
 
 
@@ -4300,7 +4352,8 @@ def lookup_cd_info(toc: dict, timeout: float = 12.0):
                                                "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            # a disc lookup is a few KB; never read more than 5 MB
+            data = json.loads(resp.read(MB_MAX_RESPONSE).decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             print("[XZN] MusicBrainz: disc not found")
@@ -4311,7 +4364,11 @@ def lookup_cd_info(toc: dict, timeout: float = 12.0):
         print(f"[XZN] MusicBrainz lookup failed: {e}")
         return None
     n_tracks = len(toc["offsets"])
-    info = parse_musicbrainz(data, disc_id, n_tracks)
+    try:
+        info = parse_musicbrainz(data, disc_id, n_tracks)
+    except Exception as e:                   # unexpected answer: just no titles
+        print(f"[XZN] MusicBrainz answer not understood: {e}")
+        return None
     if info:
         print(f"[XZN] MusicBrainz: {info['artist']} – {info['album']} "
               f"({len(info['tracks'])} titles)")
@@ -4998,7 +5055,7 @@ class LoudnessMeter:
         return np.array([shelf, highpass])
 
     def add(self, pcm):
-        if not _SCIPY_AVAILABLE or not pcm:
+        if not pcm or not ensure_scipy():
             return
         from scipy.signal import sosfilt
         x = np.frombuffer(pcm, "<i2").reshape(-1, 2)
@@ -7376,65 +7433,95 @@ class App:
         """
         Render the hero background.
 
-        For static images: display once, no animation.
-        For animated GIF/WebP: pre-convert every frame to a PhotoImage
-        and cycle through them with root.after(). The animation only
-        runs while a track is actually playing; when the render happens
-        while paused/stopped, the frames are loaded and the first frame
-        is shown, but no timer is scheduled.
+        The first frame is shown at once. For an animated GIF/WebP the
+        remaining frames are decoded and scaled in a background thread,
+        so a big animation no longer delays the start of the player; the
+        animation begins as soon as they are ready. Frames become Tk
+        images only when they are first shown. The animation only runs
+        while a track is actually playing.
         """
         self._hero_resize_job = None
 
         # Always stop the previous animation before starting fresh.
         self._stop_bg_animation()
+        self._bg_gen = getattr(self, "_bg_gen", 0) + 1
+        gen = self._bg_gen
 
         try:
             w = max(self.hero.winfo_width(), 40)
             h = max(self.hero.winfo_height(), 40)
-            frames, durations, is_animated = load_background_frames(
-                w, h, self.palette, self._bg_path
-            )
-
-            if is_animated and len(frames) > 1:
-                # --- Animated path ------------------------------------
-                self._bg_frames_photo = [
-                    ImageTk.PhotoImage(f) for f in frames
-                ]
-                self._bg_frame_durations = durations
-                self._bg_frame_index = 0
-                self._bg_photo = self._bg_frames_photo[0]
-
-                self.hero.delete("bg")
-                self.hero.create_image(
-                    0, 0, image=self._bg_photo, anchor="nw", tags="bg"
-                )
-                self.hero.tag_lower("bg")
-                self._draw_hero_overlay()
-
-                # Sync the paused flag with the player's current state
-                # so that resizing or changing the background while a
-                # track is playing keeps the animation running, and
-                # while paused/stopped keeps it frozen.
+            path = find_background_file(self._bg_path)
+            animated = False
+            first = None
+            if path:
                 try:
-                    is_playing = (self.player.state == "playing")
-                except Exception:
-                    is_playing = False
-                self._bg_anim_paused = not is_playing
-
-                if not self._bg_anim_paused:
-                    self._schedule_next_bg_frame()
-            else:
-                # --- Static path --------------------------------------
-                img = frames[0]
-                self._bg_photo = ImageTk.PhotoImage(img)
-                self.hero.delete("bg")
-                self.hero.create_image(
-                    0, 0, image=self._bg_photo, anchor="nw", tags="bg"
-                )
-                self.hero.tag_lower("bg")
-                self._draw_hero_overlay()
+                    first, animated = load_background_preview(path, w, h, self.palette)
+                except Exception as e:
+                    print(f"[XZN] Failed to load BG ({path}): {e}")
+            if first is None:
+                first = _make_gradient_bg(w, h, self.palette)
+            elif not animated:
+                print(f"[XZN] Loaded background: {path}")
+            self._show_bg_photo(ImageTk.PhotoImage(first))
+            if animated:
+                threading.Thread(target=self._load_bg_frames_thread,
+                                 args=(gen, path, w, h, self.palette), daemon=True).start()
+                self.root.after(50, self._bg_check_frames, gen)
         except Exception as e:
             print(f"[XZN] _render_bg failed: {e}")
+
+    def _show_bg_photo(self, photo):
+        self._bg_photo = photo
+        self.hero.delete("bg")
+        self.hero.create_image(0, 0, image=photo, anchor="nw", tags="bg")
+        self.hero.tag_lower("bg")
+        self._draw_hero_overlay()
+
+    def _load_bg_frames_thread(self, gen, path, w, h, palette):
+        """Decode all frames off the UI thread (PIL work only, no Tk)."""
+        try:
+            res = _load_bg_file(path, w, h, palette,
+                                cancelled=lambda: self._bg_gen != gen)
+        except Exception as e:
+            print(f"[XZN] Animated BG load failed ({path}): {e}")
+            res = None
+        self._bg_loaded = (gen, res)
+
+    def _bg_check_frames(self, gen):
+        """Wait for the frame thread, then start the animation."""
+        if self._bg_gen != gen:
+            return                            # a newer render took over
+        loaded = getattr(self, "_bg_loaded", None)
+        if not loaded or loaded[0] != gen:
+            self.root.after(50, self._bg_check_frames, gen)
+            return
+        self._bg_loaded = None
+        res = loaded[1]
+        if not res or not res[2] or len(res[0]) < 2:
+            return                            # keep showing the first frame
+        frames, durations, _ = res
+        self._bg_frames_pil = frames
+        self._bg_frames_photo = [self._bg_photo] + [None] * (len(frames) - 1)
+        self._bg_frame_durations = durations
+        self._bg_frame_index = 0
+        # Sync the paused flag with the player's current state so that
+        # resizing or changing the background while a track is playing
+        # keeps the animation running, and while paused keeps it frozen.
+        try:
+            is_playing = (self.player.state == "playing")
+        except Exception:
+            is_playing = False
+        self._bg_anim_paused = not is_playing
+        if not self._bg_anim_paused:
+            self._schedule_next_bg_frame()
+
+    def _bg_frame_photo(self, i):
+        """Tk image of frame i, created the first time it is needed."""
+        photo = self._bg_frames_photo[i]
+        if photo is None:
+            photo = ImageTk.PhotoImage(self._bg_frames_pil[i])
+            self._bg_frames_photo[i] = photo
+        return photo
 
     def _schedule_next_bg_frame(self):
         """Arm the timer for the next background animation frame."""
@@ -7471,7 +7558,7 @@ class App:
             self._bg_frame_index = (
                 self._bg_frame_index + 1
             ) % len(self._bg_frames_photo)
-            self._bg_photo = self._bg_frames_photo[self._bg_frame_index]
+            self._bg_photo = self._bg_frame_photo(self._bg_frame_index)
             try:
                 self.hero.itemconfigure("bg", image=self._bg_photo)
             except Exception:
@@ -7501,6 +7588,7 @@ class App:
                 _log_swallowed()
             self._bg_anim_job = None
         self._bg_frames_photo = None
+        self._bg_frames_pil = None
         self._bg_frame_durations = None
         self._bg_frame_index = 0
 
