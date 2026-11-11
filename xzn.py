@@ -3666,11 +3666,29 @@ class Tooltip:
 
 
 # ------------------------------------------------------------------------
+CD_FORMAT_TIPS = {
+    "MP3": "MP3: plays everywhere (lossy)",
+    "OGG": "Ogg Vorbis: open format (lossy)",
+    "OPUS": "Opus: best quality for its size (lossy)",
+    "AAC": "AAC (.m4a): good for Apple devices (lossy)",
+    "FLAC": "FLAC: lossless, compressed",
+    "ALAC": "ALAC (.m4a): Apple Lossless",
+    "WAV": "WAV: lossless, uncompressed",
+    "AIFF": "AIFF: lossless, uncompressed (Apple)",
+    "WV": "WavPack: lossless, compressed",
+}
+
+
 class FlatOptionMenu:
     """
     Cross-platform replacement for tk.OptionMenu.
+
+    wheel=True: the mouse wheel also steps through the values without
+    opening the list (down = next, up = previous). tip: tooltip text or
+    a function returning it.
     """
-    def __init__(self, parent, var, options, palette, width=10, on_change=None):
+    def __init__(self, parent, var, options, palette, width=10, on_change=None,
+                 wheel=False, tip=None):
         self.palette = palette
         self.var = var
         self.options = list(options)
@@ -3690,6 +3708,12 @@ class FlatOptionMenu:
         self.btn.bind("<Button-1>", self._open)
         self.btn.bind("<Enter>", lambda e: self.btn.config(bg=lighten(bg_color, 0.15)))
         self.btn.bind("<Leave>", lambda e: self.btn.config(bg=bg_color))
+        if wheel:
+            self.btn.bind("<MouseWheel>", lambda e: self.step(1 if e.delta < 0 else -1))
+            self.btn.bind("<Button-4>", lambda e: self.step(-1))
+            self.btn.bind("<Button-5>", lambda e: self.step(1))
+        if tip:
+            Tooltip(self.btn, tip, palette)
 
         try:
             self.var.trace_add("write", lambda *a: self._update_text())
@@ -3702,6 +3726,29 @@ class FlatOptionMenu:
     def _update_text(self):
         try:
             self.btn.config(text=self.var.get())
+        except Exception:
+            _log_swallowed()
+
+    def step(self, n):
+        """Move n places through the values (wraps around)."""
+        if not self.options or self._popup is not None:
+            return "break"
+        cur = self.var.get()
+        i = self.options.index(cur) if cur in self.options else -n
+        value = self.options[(i + n) % len(self.options)]
+        self.var.set(value)
+        self._update_text()
+        if self.on_change is not None:
+            try:
+                self.on_change(value)
+            except Exception:
+                _log_swallowed()
+        return "break"
+
+    def set_enabled(self, on):
+        """Gray text when the value does not apply (still changeable)."""
+        try:
+            self.btn.config(fg=self.palette["WHITE"] if on else self.palette["GRAY"])
         except Exception:
             _log_swallowed()
 
@@ -5431,11 +5478,21 @@ class CdWindow:
         opt.pack(fill="x", pady=(8, 0))
         tk.Label(opt, text="FORMAT", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
         formats = [f for f in CD_FORMATS if f in self._encoders]
-        FlatOptionMenu(opt, self.format_var, formats, palette=p, width=5,
-                       on_change=lambda v: self._save()).pack(side="left", padx=(6, 12))
+        # Click opens the list, the mouse wheel switches directly.
+        hint = "\nClick: list · Wheel: change"
+        self.format_btn = FlatOptionMenu(
+            opt, self.format_var, formats, palette=p, width=5, wheel=True,
+            on_change=lambda v: (self._update_bitrate_state(), self._save()),
+            tip=lambda: CD_FORMAT_TIPS.get(self.format_var.get(), "") + hint)
+        self.format_btn.pack(side="left", padx=(6, 12))
         tk.Label(opt, text="BITRATE", font=FONT_UI_B, bg=p["PANEL"], fg=p["GRAY"]).pack(side="left")
-        FlatOptionMenu(opt, self.bitrate_var, CD_BITRATES, palette=p, width=4,
-                       on_change=lambda v: self._save()).pack(side="left", padx=(6, 12))
+        self.bitrate_btn = FlatOptionMenu(
+            opt, self.bitrate_var, CD_BITRATES, palette=p, width=4, wheel=True,
+            on_change=lambda v: self._save(),
+            tip=lambda: ("Bitrate in kbit/s" if self.format_var.get() in CD_LOSSY
+                         else "Not used: " + self.format_var.get() + " is lossless") + hint)
+        self.bitrate_btn.pack(side="left", padx=(6, 12))
+        self._update_bitrate_state()
         tk.Checkbutton(opt, text="Eject when done", variable=self.eject_var,
                        command=self._save, bg=p["PANEL"], fg=p["WHITE"],
                        activebackground=p["PANEL"], activeforeground=p["ACCENT"],
@@ -5491,6 +5548,13 @@ class CdWindow:
     def _set_status(self, text, error=False):
         try:
             self.status.config(text=text, fg=self.palette["ERR"] if error else self.palette["GRAY"])
+        except Exception:
+            _log_swallowed()
+
+    def _update_bitrate_state(self):
+        """Bitrate only matters for lossy formats: gray it out otherwise."""
+        try:
+            self.bitrate_btn.set_enabled(self.format_var.get() in CD_LOSSY)
         except Exception:
             _log_swallowed()
 

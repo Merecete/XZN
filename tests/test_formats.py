@@ -67,6 +67,27 @@ with mock.patch.object(xzn.av, "open", lambda *a, **k: out, create=True), \
     xzn.TrackEncoder(os.path.join(d, "x.m4a"), "ALAC", "192")
     check(out.streams[0][:2] == ("alac", 44100), "ALAC keeps 44.1 kHz")
 
+# ---------------------------------------------------------------- list + mouse wheel
+class Var:
+    def __init__(self, v): self.v = v
+    def get(self): return self.v
+    def set(self, v): self.v = v
+pal = xzn.build_palette("#b48cff")
+seen = []
+fv = Var("MP3")
+cb = xzn.FlatOptionMenu(xzn.tk.Frame(), fv, ["MP3", "OPUS", "FLAC"], pal, on_change=seen.append, wheel=True)
+cb.step(1); check(fv.get() == "OPUS", "wheel down: next format")
+cb.step(1); cb.step(1); check(fv.get() == "MP3", "wraps around at the end")
+cb.step(-1); check(fv.get() == "FLAC" and seen[-1] == "FLAC", "wheel up: previous, change reported")
+fv.set("OGG"); cb.step(1); check(fv.get() == "MP3", "unknown saved value: starts at the first entry")
+cb._popup = object(); cb.step(1)
+check(fv.get() == "MP3", "wheel does nothing while the list is open")
+cb._popup = None
+cb.set_enabled(False)
+check(cb.btn.config.call_args.kwargs["fg"] == pal["GRAY"], "bitrate grays out for lossless formats")
+check(xzn.CD_LOSSY == {"MP3", "OGG", "OPUS", "AAC"} and set(xzn.CD_FORMAT_TIPS) == set(xzn.CD_FORMATS),
+      "every format has a tooltip; bitrate only for lossy ones")
+
 # ---------------------------------------------------------------- tags
 if not xzn._MUTAGEN_AVAILABLE:
     print("SKIP tag tests (mutagen not installed)")
