@@ -83,9 +83,9 @@ SCRIPT
     echo "Built: $OUT"
 }
 
-AUDIO_MIME="audio/mpeg;audio/ogg;audio/vorbis;audio/opus;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/mp4;audio/x-m4a;audio/x-m4b;audio/aac;audio/x-aiff;audio/x-ape;audio/x-ms-wma;"
-VIDEO_MIME="video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/webm;video/x-flv;video/x-m4v;"
-LIST_MIME="audio/x-mpegurl;application/vnd.apple.mpegurl;"
+AUDIO_MIME="audio/mpeg;audio/ogg;audio/vorbis;audio/opus;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/mp4;audio/x-m4a;audio/x-m4b;audio/aac;audio/x-aiff;audio/x-ape;audio/x-ms-wma;audio/x-aifc;audio/x-wavpack;audio/x-tta;audio/x-musepack;audio/x-speex;audio/x-matroska;audio/webm;audio/ac3;audio/vnd.dts;audio/mp2;audio/AMR;audio/basic;"
+VIDEO_MIME="video/mp4;video/x-matroska;video/x-msvideo;video/quicktime;video/webm;video/x-flv;video/x-m4v;video/x-ms-wmv;video/x-ms-asf;video/mpeg;video/mp2t;video/ogg;video/3gpp;video/3gpp2;video/dv;application/mxf;application/vnd.rn-realmedia;application/vnd.rn-realmedia-vbr;"
+LIST_MIME="audio/x-mpegurl;application/vnd.apple.mpegurl;audio/x-scpls;application/xspf+xml;"
 
 make_deb xzn "$VER" "$ROOT/dist/XZN" XZN \
     "XZN" "Streamlined media player with a cyberpunk look" \

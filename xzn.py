@@ -302,20 +302,28 @@ FONT_LG   = ("Courier New", 16, "bold")
 FONT_BTN  = ("Courier New", 10, "bold")
 FONT_TAGLINE = ("Helvetica", 11, "italic")
 
+# Everything FFmpeg (inside PyAV) can play. All decoders used here are
+# part of FFmpeg's LGPL build; no extra libraries needed.
 MEDIA_EXTS = {
+    # video
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".ogv",
-    ".mpg", ".mpeg", ".ts", ".m2ts", ".m4v", ".asf", ".3gp",
-    ".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma", ".aac",
-    ".m4a", ".m4b", ".aiff", ".ape", ".alac",
+    ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".m4v", ".asf", ".3gp", ".3g2",
+    ".vob", ".divx", ".ogm", ".rm", ".rmvb", ".f4v", ".mxf", ".dv",
+    # audio
+    ".mp3", ".mp2", ".ogg", ".oga", ".opus", ".spx", ".flac", ".wav", ".w64",
+    ".wma", ".aac", ".m4a", ".m4b", ".aiff", ".aif", ".aifc", ".caf", ".alac",
+    ".ape", ".wv", ".tta", ".mpc", ".dsf", ".dff", ".ac3", ".eac3", ".dts",
+    ".mka", ".weba", ".amr", ".au",
 }
 
-# Formats that mutagen can reliably write tags to
+# Formats whose tags XZN can read and write (see _open_tags)
 TAGGABLE_AUDIO_EXTS = {
-    ".mp3", ".ogg", ".oga", ".opus", ".flac", ".wav", ".aac",
-    ".m4a", ".m4b", ".aiff", ".ape",
+    ".mp3", ".mp2", ".ogg", ".oga", ".opus", ".spx", ".flac", ".wav", ".aac",
+    ".m4a", ".m4b", ".aiff", ".aif", ".aifc", ".ape", ".wv", ".tta", ".mpc",
+    ".dsf", ".wma",
 }
 
-PLAYLIST_EXTS = {".m3u", ".m3u8"}
+PLAYLIST_EXTS = {".m3u", ".m3u8", ".pls", ".xspf"}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -942,59 +950,224 @@ def write_m3u(path, playlist):
             f.write(p + "\n")
 
 
+def _playlist_entries(path):
+    """Raw entries of a playlist file: M3U/M3U8, PLS or XSPF."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".xspf":
+        import xml.etree.ElementTree as ET
+        from urllib.parse import unquote, urlparse
+        from urllib.request import url2pathname
+        out = []
+        for el in ET.parse(path).getroot().iter():
+            if el.tag.rsplit("}", 1)[-1] != "location" or not el.text:
+                continue
+            loc = el.text.strip()
+            u = urlparse(loc)
+            if u.scheme == "file":
+                out.append(url2pathname(unquote(u.path)) if not u.netloc
+                           else "//" + u.netloc + unquote(u.path))
+            elif not u.scheme or len(u.scheme) == 1:       # plain / Windows path
+                out.append(unquote(loc))
+        return out
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        lines = [raw.strip() for raw in f]
+    if ext == ".pls":
+        # [playlist] / File1=path / Title1=... / NumberOfEntries=...
+        return [ln.split("=", 1)[1].strip() for ln in lines
+                if ln.lower().startswith("file") and "=" in ln
+                and ln.split("=", 1)[0][4:].isdigit()]
+    return [ln for ln in lines if ln and not ln.startswith("#")]
+
+
 def read_m3u(path):
+    """Read a playlist (M3U/M3U8, PLS or XSPF). Only existing local files
+    are taken; web addresses and missing files are skipped.
+    Returns (paths, number_skipped)."""
     base_dir = os.path.dirname(os.path.abspath(path))
     out = []
     missing = 0
     try:
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
-                if line.startswith("#"):
-                    continue
-                p = line.replace("\\", os.sep).replace("/", os.sep)
-                if not os.path.isabs(p):
-                    p = os.path.join(base_dir, p)
-                p = os.path.normpath(p)
-                if os.path.isfile(p):
-                    out.append(p)
-                else:
-                    missing += 1
+        entries = _playlist_entries(path)
     except Exception as e:
-        print(f"[XZN] Failed to read M3U '{path}': {e}")
+        print(f"[XZN] Failed to read playlist '{path}': {e}")
         return [], 0
+    for entry in entries:
+        if "://" in entry:
+            missing += 1
+            continue
+        p = entry.replace("\\", os.sep).replace("/", os.sep)
+        if not os.path.isabs(p):
+            p = os.path.join(base_dir, p)
+        p = os.path.normpath(p)
+        if os.path.isfile(p):
+            out.append(p)
+        else:
+            missing += 1
     if missing:
-        print(f"[XZN] M3U import: {missing} path(s) not found and skipped")
+        print(f"[XZN] Playlist import: {missing} entry(s) not found and skipped")
     return out, missing
 
 
 # ------------------------------------------------------------------------
 # Tag reading / writing (mutagen)
 # ------------------------------------------------------------------------
+# mutagen stores tags differently per format family. XZN uses one set of
+# simple names (title, artist, ...) and translates them here:
+#   easy  - MP3/MP2/TTA (EasyID3), M4A/M4B (EasyMP4), OGG/Opus/Speex/FLAC
+#           (Vorbis comments): the simple names work directly
+#   id3   - WAV, AIFF, DSF, and raw AAC (ADTS) files: ID3 frames
+#   ape   - WavPack, Musepack, Monkey's Audio: APEv2 items
+#   asf   - WMA: Windows Media attributes
+TAG_FIELDS = ("title", "artist", "album", "genre", "date", "tracknumber")
+
+_ID3_FRAMES = {"title": "TIT2", "artist": "TPE1", "album": "TALB", "albumartist": "TPE2",
+               "genre": "TCON", "date": "TDRC", "tracknumber": "TRCK", "discnumber": "TPOS"}
+_APE_KEYS = {"title": "Title", "artist": "Artist", "album": "Album", "albumartist": "Album Artist",
+             "genre": "Genre", "date": "Year", "tracknumber": "Track", "discnumber": "Disc"}
+_ASF_KEYS = {"title": "Title", "artist": "Author", "album": "WM/AlbumTitle",
+             "albumartist": "WM/AlbumArtist", "genre": "WM/Genre", "date": "WM/Year",
+             "tracknumber": "WM/TrackNumber", "discnumber": "WM/PartOfSet"}
+_RG_KEYS = ("replaygain_track_gain", "replaygain_track_peak",
+            "replaygain_album_gain", "replaygain_album_peak")
+
+
+class _RawID3:
+    """ID3 tag on a file mutagen has no tag support for (raw AAC)."""
+
+    def __init__(self, path):
+        from mutagen.id3 import ID3, ID3NoHeaderError
+        self.path = path
+        try:
+            self.tags = ID3(path)
+        except ID3NoHeaderError:
+            self.tags = ID3()
+
+    def save(self, **kw):
+        self.tags.save(self.path, **kw)
+
+
+def _save_tags(audio, kind):
+    """Save; ID3 tags as version 2.3, which Windows Explorer shows too."""
+    from mutagen.easyid3 import EasyID3
+    if kind == "id3" or isinstance(audio.tags, EasyID3):
+        try:
+            audio.save(v2_version=3)
+            return
+        except TypeError:
+            pass
+    audio.save()
+
+
+def _open_tags(path):
+    """Open a file for tag access: (audio, kind) or (None, None)."""
+    if not _MUTAGEN_AVAILABLE or MutagenFile is None:
+        return None, None
+    from mutagen.id3 import ID3
+    from mutagen.apev2 import APEv2
+    from mutagen.asf import ASFTags
+    from mutagen.easymp4 import EasyMP4Tags
+    from mutagen.easyid3 import EasyID3
+    for key in _RG_KEYS:
+        # ReplayGain as the TXXX frames / freeform atoms other players read
+        # (EasyID3's own replaygain keys would write RVA2 frames instead)
+        if not getattr(EasyID3, "_xzn_rg", False):
+            EasyID3.RegisterTXXXKey(key, key.upper())
+        if key not in EasyMP4Tags.Get:
+            EasyMP4Tags.RegisterFreeformKey(key, key)
+    EasyID3._xzn_rg = True
+    raw_aac = os.path.splitext(path)[1].lower() == ".aac"
+    try:
+        audio = MutagenFile(path, easy=True)
+    except Exception:
+        if not raw_aac:          # an ID3 tag in front of AAC confuses detection
+            raise
+        audio = None
+    if audio is not None and audio.tags is None:
+        try:
+            audio.add_tags()
+        except Exception:
+            audio = None if raw_aac else audio
+    if audio is None or audio.tags is None:
+        if raw_aac:
+            return _RawID3(path), "id3"
+        return None, None
+    tags = audio.tags
+    if isinstance(tags, ID3):
+        return audio, "id3"
+    if isinstance(tags, APEv2):
+        return audio, "ape"
+    if isinstance(tags, ASFTags):
+        return audio, "asf"
+    return audio, "easy"
+
+
+def _get_tag(audio, kind, key):
+    t = audio.tags
+    try:
+        if kind == "easy":
+            v = t.get(key)
+        elif kind == "id3":
+            if key.startswith("replaygain_"):
+                v = t.get("TXXX:" + key.upper()) or t.get("TXXX:" + key)
+            else:
+                v = t.get(_ID3_FRAMES.get(key, ""))
+        elif kind == "ape":
+            v = t.get(_APE_KEYS.get(key, key))
+        else:
+            v = t.get(_ASF_KEYS.get(key, key))
+            if v:
+                v = [getattr(x, "value", x) for x in v]
+        if v is None:
+            return ""
+        if hasattr(v, "text"):
+            v = v.text
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else ""
+        return str(v).strip()
+    except Exception:
+        return ""
+
+
+def _set_tag(audio, kind, key, value):
+    """Set one tag; an empty value removes it."""
+    t = audio.tags
+    if kind == "easy":
+        if value:
+            t[key] = [value]
+        elif key in t:
+            del t[key]
+        return
+    if kind == "id3":
+        from mutagen.id3 import Frames, TXXX
+        if key.startswith("replaygain_"):
+            fid = "TXXX:" + key.upper()
+            frame = TXXX(encoding=3, desc=key.upper(), text=[value]) if value else None
+        else:
+            fid = _ID3_FRAMES[key]
+            frame = Frames[fid](encoding=3, text=[value]) if value else None
+        t.delall(fid)
+        if frame is not None:
+            t.add(frame)
+        return
+    name = (_APE_KEYS if kind == "ape" else _ASF_KEYS).get(key, key)
+    if value:
+        t[name] = value if kind == "ape" else [value]
+    elif name in t:
+        del t[name]
+
+
 def read_tags(path):
     """
     Read the most common audio tags from a file.
     Returns a dict with keys: title, artist, album, genre, date, tracknumber.
     Missing values are empty strings.
     """
-    result = {
-        "title": "", "artist": "", "album": "",
-        "genre": "", "date": "", "tracknumber": "",
-    }
-    if not _MUTAGEN_AVAILABLE or MutagenFile is None:
-        return result
+    result = {k: "" for k in TAG_FIELDS}
     try:
-        audio = MutagenFile(path, easy=True)
-        if audio is None:
-            return result
-        for key in result.keys():
-            val = audio.get(key)
-            if val and isinstance(val, (list, tuple)) and len(val) > 0:
-                result[key] = str(val[0]).strip()
-            elif isinstance(val, str):
-                result[key] = val.strip()
+        audio, kind = _open_tags(path)
+        if audio is not None:
+            for key in TAG_FIELDS:
+                result[key] = _get_tag(audio, kind, key)
     except Exception as e:
         print(f"[XZN] Failed to read tags from '{path}': {e}")
     return result
@@ -1009,19 +1182,12 @@ def write_tags(path, tags):
     if not _MUTAGEN_AVAILABLE or MutagenFile is None:
         return False, "mutagen is not installed."
     try:
-        audio = MutagenFile(path, easy=True)
+        audio, kind = _open_tags(path)
         if audio is None:
-            return False, "Could not open file for tag editing."
+            return False, "This file type has no tags XZN can edit."
         for key, value in tags.items():
-            try:
-                if value:
-                    audio[key] = [value]
-                else:
-                    if key in audio:
-                        del audio[key]
-            except Exception as e:
-                print(f"[XZN] Failed to set tag '{key}': {e}")
-        audio.save()
+            _set_tag(audio, kind, key, str(value or "").strip())
+        _save_tags(audio, kind)
         return True, ""
     except PermissionError:
         return False, "Permission denied — file may be read-only."
@@ -4238,7 +4404,21 @@ class BgPopup:
 CD_SECTOR_BYTES = 2352
 CD_SECTORS_PER_SECOND = 75
 CD_SESSION_GAP = 11400          # enhanced CDs: audio session → data session
-CD_FORMATS = ["MP3", "OGG", "FLAC", "WAV"]
+# Rip formats: (encoder in FFmpeg, file extension). Bitrate applies to
+# the lossy ones; FLAC, ALAC, WAV, AIFF and WavPack are lossless.
+CD_FORMAT_INFO = {
+    "MP3":  ("libmp3lame", ".mp3"),
+    "OGG":  ("libvorbis", ".ogg"),
+    "OPUS": ("libopus", ".opus"),
+    "AAC":  ("aac", ".m4a"),
+    "FLAC": ("flac", ".flac"),
+    "ALAC": ("alac", ".m4a"),
+    "WAV":  (None, ".wav"),
+    "AIFF": ("pcm_s16be", ".aiff"),
+    "WV":   ("wavpack", ".wv"),
+}
+CD_FORMATS = list(CD_FORMAT_INFO)
+CD_LOSSY = {"MP3", "OGG", "OPUS", "AAC"}
 CD_BITRATES = ["128", "192", "256", "320"]
 CDDA_PREFIX = "cdda://"
 
@@ -4937,13 +5117,10 @@ def cd_encoders():
         names = set(av.codecs_available)
     except Exception:
         names = set()
-    if "flac" in names:
-        ok.add("FLAC")
-    if "libvorbis" in names:
-        ok.add("OGG")
-    if "libmp3lame" in names:
-        ok.add("MP3")
-    else:
+    for fmt, (codec, _ext) in CD_FORMAT_INFO.items():
+        if codec and codec in names:
+            ok.add(fmt)
+    if "MP3" not in ok:
         try:
             import lameenc  # noqa: F401
             ok.add("MP3")
@@ -4953,7 +5130,9 @@ def cd_encoders():
 
 
 class TrackEncoder:
-    """Writes 16-bit stereo 44.1 kHz PCM to MP3 / OGG / FLAC / WAV."""
+    """Writes 16-bit stereo 44.1 kHz PCM in one of the CD_FORMATS.
+    Opus only works at 48 kHz; PyAV converts the sample rate (and the
+    sample format each encoder wants) on the fly."""
 
     def __init__(self, path, fmt, bitrate="320"):
         self.path, self.fmt = path, fmt
@@ -4975,9 +5154,9 @@ class TrackEncoder:
             self._lame.set_quality(2)
             self._file = open(path, "wb")
             return
-        codec = {"MP3": "libmp3lame", "OGG": "libvorbis", "FLAC": "flac"}[fmt]
+        codec = CD_FORMAT_INFO[fmt][0]
         self._out = av.open(path, "w")
-        st = self._out.add_stream(codec, rate=44100)
+        st = self._out.add_stream(codec, rate=48000 if fmt == "OPUS" else 44100)
         cc = getattr(st, "codec_context", st)
         for target in (cc, st):
             try:
@@ -4985,7 +5164,7 @@ class TrackEncoder:
                 break
             except Exception:
                 continue
-        if fmt in ("MP3", "OGG"):
+        if fmt in CD_LOSSY:
             try:
                 cc.bit_rate = int(bitrate) * 1000
             except Exception:
@@ -5087,41 +5266,27 @@ class LoudnessMeter:
 
 
 def write_cd_tags(path, fmt, tags):
-    """Write tags + ReplayGain with mutagen (ID3 for MP3/WAV, Vorbis
-    comments for OGG/FLAC). Never raises."""
+    """Write tags + ReplayGain to a ripped file, in the tag format that
+    belongs to it (see _open_tags). Opus files get the R128 gain their
+    standard asks for instead of ReplayGain tags. Never raises."""
     if not _MUTAGEN_AVAILABLE:
         return
     tags = {k: str(v) for k, v in tags.items() if v not in (None, "")}
+    if fmt == "OPUS" and "replaygain_track_gain" in tags:
+        # R128_TRACK_GAIN: Q7.8 fixed point relative to -23 LUFS
+        # (ReplayGain is relative to -18 LUFS, hence the 5 dB).
+        gain = _rg_float(tags.pop("replaygain_track_gain")) or 0.0
+        tags.pop("replaygain_track_peak", None)
+        tags["r128_track_gain"] = str(int(round((gain - 5.0) * 256)))
     try:
-        if fmt in ("MP3", "WAV"):
-            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TDRC, TRCK, TPOS, TXXX
-            frames = {"title": TIT2, "artist": TPE1, "album": TALB, "albumartist": TPE2,
-                      "date": TDRC, "tracknumber": TRCK, "discnumber": TPOS}
-            if fmt == "WAV":
-                from mutagen.wave import WAVE
-                audio = WAVE(path)
-                if audio.tags is None:
-                    audio.add_tags()
-                id3 = audio.tags
-            else:
-                try:
-                    id3 = ID3(path)
-                except Exception:
-                    id3 = ID3()
-            for k, v in tags.items():
-                if k in frames:
-                    id3.add(frames[k](encoding=3, text=[v]))
-                elif k.startswith("replaygain_"):
-                    id3.add(TXXX(encoding=3, desc=k.upper(), text=[v]))
-            if fmt == "WAV":
-                audio.save()
-            else:
-                id3.save(path, v2_version=3)
-        else:
-            audio = MutagenFile(path)
-            for k, v in tags.items():
-                audio[k.upper()] = [v]
-            audio.save()
+        audio, kind = _open_tags(path)
+        if audio is None:
+            return
+        for k, v in tags.items():
+            if kind != "easy" and k.startswith("r128_"):
+                continue
+            _set_tag(audio, kind, k, v)
+        _save_tags(audio, kind)
     except Exception as e:
         print(f"[XZN] Tagging failed for {os.path.basename(path)}: {e}")
 
@@ -5134,7 +5299,7 @@ def rip_cd(drive, toc, tracks, outdir, fmt, bitrate, info, report, cancel):
         outdir = os.path.join(outdir, safe_filename(
             f"{info.get('artist') or 'Unknown Artist'} - {info.get('album') or 'Unknown Album'}"))
     os.makedirs(outdir, exist_ok=True)
-    ext = {"MP3": ".mp3", "OGG": ".ogg", "FLAC": ".flac", "WAV": ".wav"}[fmt]
+    ext = CD_FORMAT_INFO[fmt][1]
     n_disc = len(toc["offsets"])
     done = 0
     for idx, track in enumerate(tracks, start=1):
@@ -5190,7 +5355,8 @@ def rip_cd(drive, toc, tracks, outdir, fmt, bitrate, info, report, cancel):
 
 # ------------------------------------------------------------------------
 class CdWindow:
-    """Audio CD window: play the CD in XZN or rip it (MP3/OGG/FLAC/WAV,
+    """Audio CD window: play the CD in XZN or rip it (MP3, OGG, Opus, AAC,
+    FLAC, ALAC, WAV, AIFF, WavPack;
     titles from MusicBrainz, tags + ReplayGain). Opened with the CD
     button; a second click closes it like the other tool windows."""
 
@@ -7816,7 +7982,7 @@ class App:
             title="Add media files or playlists",
             filetypes=[
                 ("Media files", exts),
-                ("Playlists (M3U)", pl_exts),
+                ("Playlists (M3U / PLS / XSPF)", pl_exts),
                 ("All files", "*.*"),
             ])
         if not paths:
@@ -7970,7 +8136,7 @@ class App:
         paths = filedialog.askopenfilenames(
             title="Import playlist(s)",
             filetypes=[
-                ("Playlists (M3U / M3U8)", pl_exts),
+                ("Playlists (M3U / PLS / XSPF)", pl_exts),
                 ("All files", "*.*"),
             ])
         if not paths:

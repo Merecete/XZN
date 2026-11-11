@@ -26,6 +26,7 @@ your real XZN settings.
 | `test_cd_drive_errors.py` | Reconnecting after a lost drive connection, scratched sectors |
 | `test_cd_messages.py` | Messages for an empty drive, data discs and real errors |
 | `test_visualizer_and_colors.py` | Visualizer styles (click to cycle, saved) and the custom color picker |
+| `test_formats.py` | Playable formats, PLS / XSPF import, CD rip formats, tags for every format (uses mutagen and, if installed, ffmpeg) |
 | `test_build_spec.py` | `installer/xzn.spec` bundles all files, scipy and the right version |
 
 What these tests can't cover: real audio output, the look of the

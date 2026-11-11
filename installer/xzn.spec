@@ -143,9 +143,13 @@ else:
 
 # --- macOS app bundle -------------------------------------------------
 if sys.platform == "darwin" and not ONEFILE:
-    _audio = ["mp3", "ogg", "oga", "opus", "flac", "wav", "m4a", "m4b",
-              "aac", "aiff", "aif", "ape", "wma"]
-    _video = ["mp4", "mkv", "avi", "mov", "webm", "flv", "m4v"]
+    _audio = ["mp3", "mp2", "ogg", "oga", "opus", "spx", "flac", "wav", "w64",
+              "m4a", "m4b", "aac", "aiff", "aif", "aifc", "caf", "ape", "wv",
+              "tta", "mpc", "dsf", "dff", "ac3", "eac3", "dts", "mka", "weba",
+              "amr", "au", "wma"]
+    _video = ["mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "wmv", "asf",
+              "mpg", "mpeg", "ts", "m2ts", "mts", "ogv", "3gp", "3g2", "vob",
+              "divx", "ogm", "rm", "rmvb", "f4v", "mxf", "dv"]
     app = BUNDLE(
         coll,
         name="XZN.app",
