@@ -44,8 +44,25 @@ with mock.patch.object(xzn.av, "codecs_available",
                        {"libmp3lame", "libvorbis", "libopus", "aac", "flac", "alac", "pcm_s16be", "wavpack"},
                        create=True):
     check(xzn.cd_encoders() == set(xzn.CD_FORMATS), "all nine rip formats offered when FFmpeg has the encoders")
-with mock.patch.object(xzn.av, "codecs_available", {"flac"}, create=True):
-    check(xzn.cd_encoders() >= {"WAV", "FLAC"} and "OPUS" not in xzn.cd_encoders(), "missing encoders are hidden")
+with mock.patch.object(xzn.av, "codecs_available", {"flac"}, create=True), \
+     mock.patch.object(xzn, "_soundfile_vorbis", return_value=False):
+    check(xzn.cd_encoders() >= {"WAV", "FLAC"} and not {"OPUS", "OGG"} & xzn.cd_encoders(), "missing encoders are hidden")
+with mock.patch.object(xzn.av, "codecs_available", {"libopus", "libmp3lame"}, create=True), \
+     mock.patch.object(xzn, "_soundfile_vorbis", return_value=True):
+    check("OGG" in xzn.cd_encoders(), "OGG via soundfile when PyAV has no libvorbis")
+if xzn._soundfile_vorbis():
+    with mock.patch.object(xzn.av, "codecs_available", {"libopus"}, create=True):
+        ogg = os.path.join(d, "rip.ogg")
+        t = np.arange(44100 * 3) / 44100
+        pcm = (np.stack([np.sin(2 * np.pi * 440 * t)] * 2, 1) * 9000).astype("<i2").tobytes()
+        enc = xzn.TrackEncoder(ogg, "OGG", "192")
+        enc.write(pcm); enc.close()
+        import soundfile
+        info = soundfile.info(ogg)
+        check(info.subtype == "VORBIS" and info.samplerate == 44100 and abs(info.duration - 3) < 0.05,
+              f"OGG rip through soundfile: {info.subtype}, {info.duration:.2f} s")
+else:
+    print("SKIP OGG encode test (soundfile not installed)")
 check({f: e for f, (_c, e) in xzn.CD_FORMAT_INFO.items()} ==
       {"MP3": ".mp3", "OGG": ".ogg", "OPUS": ".opus", "AAC": ".m4a", "FLAC": ".flac",
        "ALAC": ".m4a", "WAV": ".wav", "AIFF": ".aiff", "WV": ".wv"}, "file extensions per rip format")

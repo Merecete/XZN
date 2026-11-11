@@ -5173,7 +5173,28 @@ def cd_encoders():
             ok.add("MP3")
         except Exception:
             print("[XZN] MP3 encoding unavailable (no libmp3lame in PyAV, no lameenc)")
+    if "OGG" not in ok:
+        # Current PyAV wheels no longer include libvorbis; soundfile
+        # (libsndfile) brings the real Vorbis encoder instead.
+        if _soundfile_vorbis():
+            ok.add("OGG")
+        else:
+            print("[XZN] OGG encoding unavailable (no libvorbis in PyAV, no soundfile)")
     return ok
+
+
+def _soundfile_vorbis():
+    """True if soundfile can write Ogg Vorbis."""
+    try:
+        import soundfile
+        return "VORBIS" in soundfile.available_subtypes("OGG")
+    except Exception:
+        return False
+
+
+# Vorbis quality (0..1) per bitrate at 44.1 kHz stereo, used with soundfile
+# (libsndfile sets quality = 1 - compression_level).
+_VORBIS_QUALITY = {"128": 0.4, "192": 0.6, "256": 0.8, "320": 0.9}
 
 
 class TrackEncoder:
@@ -5183,7 +5204,7 @@ class TrackEncoder:
 
     def __init__(self, path, fmt, bitrate="320"):
         self.path, self.fmt = path, fmt
-        self._wav = self._lame = self._out = self._file = None
+        self._wav = self._lame = self._out = self._file = self._sf = None
         self._samples = 0
         if fmt == "WAV":
             import wave
@@ -5200,6 +5221,13 @@ class TrackEncoder:
             self._lame.set_channels(2)
             self._lame.set_quality(2)
             self._file = open(path, "wb")
+            return
+        if fmt == "OGG" and "libvorbis" not in set(av.codecs_available):
+            import soundfile
+            q = _VORBIS_QUALITY.get(str(bitrate), 0.6)
+            self._sf = soundfile.SoundFile(path, "w", samplerate=44100, channels=2,
+                                           format="OGG", subtype="VORBIS",
+                                           compression_level=1.0 - q)
             return
         codec = CD_FORMAT_INFO[fmt][0]
         self._out = av.open(path, "w")
@@ -5229,6 +5257,9 @@ class TrackEncoder:
         if self._lame is not None:
             self._file.write(self._lame.encode(pcm))
             return
+        if self._sf is not None:
+            self._sf.write(np.frombuffer(pcm, "<i2").reshape(-1, 2))
+            return
         arr = np.frombuffer(pcm, "<i2").reshape(1, -1)
         frame = av.AudioFrame.from_ndarray(arr, format="s16", layout="stereo")
         frame.sample_rate = 44100
@@ -5244,6 +5275,8 @@ class TrackEncoder:
         elif self._lame is not None:
             self._file.write(self._lame.flush())
             self._file.close()
+        elif self._sf is not None:
+            self._sf.close()
         elif self._out is not None:
             for pkt in self._stream.encode(None):
                 self._out.mux(pkt)

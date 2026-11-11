@@ -54,7 +54,7 @@ datas = [
 ]
 binaries = []
 # certifi: CA certificates for the HTTPS MusicBrainz lookup (audio CDs)
-hiddenimports = ["certifi"]
+hiddenimports = ["certifi", "soundfile", "_soundfile"]
 
 
 # --- Packages with native binaries -----------------------------------
@@ -64,7 +64,10 @@ hiddenimports = ["certifi"]
 # tkinterdnd2         → Tcl/Tk DnD library
 # mutagen             → optional, pure Python (harmless if missing)
 # jeepney             → Linux media keys (MPRIS), pure Python
-for pkg in ("av", "sounddevice", "PIL", "tkinterdnd2", "mutagen", "jeepney"):
+# soundfile           → libsndfile with the Ogg Vorbis encoder (CD rips to
+#                       OGG; PyAV no longer ships libvorbis)
+for pkg in ("av", "sounddevice", "PIL", "tkinterdnd2", "mutagen", "jeepney",
+            "soundfile", "_soundfile_data"):
     try:
         d, b, h = collect_all(pkg)
         datas         += d

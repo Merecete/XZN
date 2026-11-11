@@ -5,6 +5,8 @@ Pillow>=10.0
 tkinterdnd2>=0.3.0
 mutagen>=1.47
 scipy>=1.10
+# Ogg Vorbis encoder for CD rips (PyAV wheels no longer include libvorbis)
+soundfile>=0.12
 jeepney>=0.8; sys_platform == "linux"
 # CA certificates for the MusicBrainz lookup (audio CDs)
 certifi
