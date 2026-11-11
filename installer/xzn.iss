@@ -7,7 +7,7 @@
 ; Version: passed in by build_windows.bat (/DMyAppVersion=...),
 ; this value is only the fallback for building by hand.
 #ifndef MyAppVersion
-  #define MyAppVersion  "1.1.2"
+  #define MyAppVersion  "1.1.3"
 #endif
 #define MyAppPublisher  "Merecete"
 #define MyAppURL        "https://example.com/xzn"

@@ -108,6 +108,34 @@ check(not app._pl_hidden and app.pl_title.config.call_args.kwargs["text"] == "â–
 plf_info = [i for w, i in app._ui_pack_order if w is app._ui_plf]
 check(not plf_info or plf_info[-1]["expand"] is True, "mini mode restores the playlist layout")
 
+# animated background: first frame at once, the rest loaded in a thread
+import time as _time, tempfile as _tf
+from PIL import Image as _Img
+_gif = os.path.join(_tf.mkdtemp(), "bg.gif")
+_fr = [_Img.new("RGB", (400, 240), (i * 8, 0, 255 - i * 8)) for i in range(30)]
+_fr[0].save(_gif, save_all=True, append_images=_fr[1:], duration=50, loop=0)
+app._bg_path = _gif
+app.hero.winfo_width.return_value = 560
+app.hero.winfo_height.return_value = 210
+app.player.state = "playing"
+_t0 = _time.perf_counter()
+app._render_bg()
+_fast = _time.perf_counter() - _t0
+check(app._bg_photo is not None and app._bg_frames_photo is None, f"first frame shown at once ({_fast:.3f}s)")
+_gen = app._bg_gen
+_end = _time.time() + 10
+while (not getattr(app, "_bg_loaded", None)) and _time.time() < _end:
+    _time.sleep(0.02)
+app._bg_check_frames(_gen)
+check(app._bg_frames_photo is not None and len(app._bg_frames_photo) == 30
+      and app._bg_frames_photo.count(None) == 29, "all frames loaded in the background, Tk images made on demand")
+app._bg_anim_tick()
+check(app._bg_frames_photo[1] is not None, "next frame converted when it is shown")
+app._render_bg(); _g1 = app._bg_gen; app._render_bg()
+_time.sleep(0.5); app._bg_check_frames(_g1)
+check(app._bg_frames_photo is None, "an outdated load (window resized) is dropped")
+check(xzn.ensure_scipy(), "scipy loaded in the background")
+
 # media keys dispatch
 app.player.state = "playing"
 with mock.patch.object(app, "toggle_play") as tp, mock.patch.object(app, "next_track") as nt:

@@ -73,8 +73,10 @@ SCRIPT
         echo "Description: $DESC"
     } > "$PKG/DEBIAN/control"
 
-    # Directories 0755, files keep their mode (PyInstaller sets +x where needed).
+    # Directories 0755, files keep their mode (PyInstaller sets +x where
+    # needed) but are never writable by group/others, whatever the umask.
     find "$PKG" -type d -exec chmod 0755 {} +
+    find "$PKG" -type f -exec chmod go-w {} +
     case "$ARCH" in amd64) FARCH=x86_64 ;; arm64) FARCH=arm_64 ;; *) FARCH="$ARCH" ;; esac
     OUT="$ROOT/release/XZN-Linux-${FARCH}_v${PVER}.deb"
     dpkg-deb --build --root-owner-group "$PKG" "$OUT"
