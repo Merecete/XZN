@@ -27,7 +27,7 @@ Xenon-Zones (XZN) is an all-in-one media player for Windows, Linux and macOS: it
 
 **Audio CDs**
 - Play CDs directly, with artist and track titles from MusicBrainz
-- Rip all or selected tracks to MP3, OGG, FLAC or WAV, fully tagged and sorted into album folders
+- Rip all or selected tracks to MP3, OGG, FLAC, WAV, Opus, AAC and ALAC (both .m4a), AIFF and WavPack fully tagged and sorted into album folders
 - No extra tools needed on Windows, Linux or macOS
 
 **Playlist**
