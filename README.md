@@ -1,10 +1,8 @@
 # Xenon-Zones (XZN)
 
-Xenon-Zones (XZN) is an all-in-one media player for Windows, Linux and macOS: it plays audio and video, and plays and rips audio CDs without any additional software. Everything is built in, equalizer, ReplayGain, tag editor, playlist, no plugins and no external tools to install.
+Xenon-Zones (XZN) is a lightweight, cross-platform media player for Windows, Linux and macOS. Built with a focus on low resource consumption and a clean user experience, it is ideal for laptops, VMs and minimal setups. XZN stands out with its customizable cyberpunk interface and animated backgrounds, and it plays and rips audio CDs without any additional software.
 
 ## Screenshots
-
-![XZN-Logo](Screenshots/XZN-Logo.png)
 
 ![Main window](Screenshots/main.png)
 
@@ -19,7 +17,8 @@ Xenon-Zones (XZN) is an all-in-one media player for Windows, Linux and macOS: it
 ## Features
 
 **Playback**
-- Audio and video playback (via PyAV / FFmpeg)
+- Audio and video playback (via PyAV / FFmpeg) in all common formats, from MP3, AAC, FLAC and Opus
+  to WavPack, Musepack, DSD, AIFF, MKV, VOB, AVCHD (.mts) and RealMedia
 - Gapless playback and ReplayGain volume leveling
 - Resumes where you left off
 - 10-band graphic equalizer with presets and a spectrum analyzer
@@ -27,13 +26,16 @@ Xenon-Zones (XZN) is an all-in-one media player for Windows, Linux and macOS: it
 
 **Audio CDs**
 - Play CDs directly, with artist and track titles from MusicBrainz
-- Rip all or selected tracks to MP3, OGG, FLAC, WAV, Opus, AAC and ALAC (both .m4a), AIFF and WavPack fully tagged and sorted into album folders
+- Rip all or selected tracks to MP3, OGG, Opus, AAC, FLAC, ALAC, WAV, AIFF or WavPack, fully tagged
+  (with ReplayGain) and sorted into album folders
 - No extra tools needed on Windows, Linux or macOS
 
 **Playlist**
-- Drag & drop, reordering, M3U / M3U8 import and export
+- Drag & drop, reordering (drag rows with the mouse or use the arrow buttons),
+  M3U / M3U8 export, M3U / M3U8 / PLS / XSPF import
 - Type-to-search (mouse over the playlist and start typing)
-- Tag editor for audio files
+- Click the PLAYLIST header to hide or show the playlist
+- Tag editor for audio files (ID3, Vorbis, MP4, APE and WMA tags)
 - Auto-saves playlist and settings on every change
 
 **Interface**
@@ -84,4 +86,4 @@ See [installer/README.md](installer/README.md). One script per platform builds X
 
 ## License
 
-Released under the MIT License. See [LICENSE.txt](LICENSE.txt) for details.
+Released under the BSD 3-Clause License. See [LICENSE.txt](LICENSE.txt) for details.

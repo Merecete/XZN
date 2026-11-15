@@ -165,7 +165,7 @@ if sys.platform == "darwin" and not ONEFILE:
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
-            "NSHumanReadableCopyright": "© 2026 Merecete. MIT License.",
+            "NSHumanReadableCopyright": "© 2026 Merecete. BSD 3-Clause License.",
             # "Open with XZN" in Finder (handled via ::tk::mac::OpenDocument)
             "CFBundleDocumentTypes": [
                 {"CFBundleTypeName": "Audio", "CFBundleTypeRole": "Viewer",

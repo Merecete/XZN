@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.1.3
+Xenon-Zones (XZN) v1.1.4
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -33,7 +33,7 @@ Platform notes
 - Optional: drag & drop needs `tkinterdnd2`; tag editing needs `mutagen`
 
 Copyright (c) 2026 Merecete
-Released under the MIT License. See LICENSE file for details.
+Released under the BSD 3-Clause License. See LICENSE.txt for details.
 """
 import os
 import sys
@@ -228,7 +228,7 @@ threading.Thread(target=_load_scipy, name="xzn-scipy", daemon=True).start()
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -244,28 +244,35 @@ LOGO_FILENAME = "xzn-logo.png"
 INTRO_FILENAME = "XZN Intro.mp3"
 TASKBAR_APP_ID = "com.merecete.xzn.mediaplayer.1"
 
-# --- Full MIT license text (for the Info window button) ----------------
-MIT_LICENSE_TEXT = """MIT License
+# --- Full license text (for the Info window button) ------------------
+LICENSE_TEXT = """BSD 3-Clause License
 
-Copyright (c) 2026 Merecete
+Copyright (c) 2026, Merecete
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
 # --- Default palette (dark bluish purple) -------------------------------
@@ -2957,11 +2964,11 @@ class VideoWindow:
 
 
 # ------------------------------------------------------------------------
-# License window (full MIT text)
+# License window (full license text)
 # ------------------------------------------------------------------------
 def show_license_window(parent, palette, app=None):
     """
-    Open a small window showing the full MIT license text.
+    Open a small window showing the full license text.
     Read-only, scrollable, matching the app's look.
     Registers itself with the app so the alpha slider affects it too.
     """
@@ -3019,7 +3026,7 @@ def show_license_window(parent, palette, app=None):
     header = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
     header.pack(side="top", fill="x")
 
-    tk.Label(header, text="MIT LICENSE",
+    tk.Label(header, text="BSD 3-CLAUSE LICENSE",
              font=("Helvetica", 12, "bold"),
              bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
 
@@ -3055,7 +3062,7 @@ def show_license_window(parent, palette, app=None):
     sb.pack(side="right", fill="y")
     txt.config(yscrollcommand=sb.set)
 
-    txt.insert("1.0", MIT_LICENSE_TEXT)
+    txt.insert("1.0", LICENSE_TEXT)
     txt.config(state="disabled")
 
     win.bind("<Escape>", lambda e: _close())
@@ -3164,7 +3171,7 @@ class InfoWindow:
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(2, 2))
 
-        tk.Label(frame, text="Released under the MIT License.",
+        tk.Label(frame, text="Released under the BSD 3-Clause License.",
                  font=FONT_UI,
                  bg=p["PANEL"], fg=p["GRAY"]).pack(anchor="w", pady=(0, 16))
 
@@ -5187,8 +5194,13 @@ def _soundfile_vorbis():
     """True if soundfile can write Ogg Vorbis."""
     try:
         import soundfile
-        return "VORBIS" in soundfile.available_subtypes("OGG")
-    except Exception:
+        subtypes = soundfile.available_subtypes("OGG")
+        if "VORBIS" not in subtypes:
+            print(f"[XZN] soundfile {soundfile.__version__} has no Vorbis encoder "
+                  f"(libsndfile {soundfile.__libsndfile_version__}, OGG: {sorted(subtypes)})")
+        return "VORBIS" in subtypes
+    except Exception as e:
+        print(f"[XZN] soundfile not usable for OGG: {type(e).__name__}: {e}")
         return False
 
 
@@ -6141,6 +6153,134 @@ class MprisMediaKeys:
 
 
 # ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
+# Single instance
+# ------------------------------------------------------------------------
+# Opening a file with XZN while XZN is already running must not start a
+# second player (two players would fight over the sound card and the
+# settings file). The first XZN listens on a fixed local port (only on
+# 127.0.0.1, per user); a second start sends its files there and quits.
+# A random key in the user's own settings folder makes sure only this
+# user's XZN is talked to.
+
+def _instance_port():
+    import getpass
+    import zlib
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = os.path.expanduser("~")
+    return 49152 + zlib.crc32(f"XZN:{user}".encode("utf-8")) % 16000
+
+
+def _instance_key_path():
+    return os.path.join(_get_app_data_dir(), "instance.key")
+
+
+class InstanceServer:
+    MAX_MESSAGE = 1024 * 1024
+
+    def __init__(self, sock, key):
+        self._sock, self._key = sock, key
+        self._lock = threading.Lock()
+        self._pending = None            # None = nothing; list = files (may be empty)
+        threading.Thread(target=self._serve, name="xzn-instance", daemon=True).start()
+
+    @classmethod
+    def start(cls):
+        """Listen for other XZN starts. Returns the server, False if the
+        port is taken (another XZN runs), or None if this is not possible."""
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if IS_WINDOWS:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", _instance_port()))
+            s.listen(8)
+        except OSError:
+            s.close()
+            return False
+        key = os.urandom(16).hex()
+        try:
+            path = _instance_key_path()
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(key)
+        except Exception as e:
+            print(f"[XZN] Single instance disabled: {e}")
+            s.close()
+            return None
+        return cls(s, key)
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _addr = self._sock.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(3.0)
+                data = b""
+                while len(data) <= self.MAX_MESSAGE:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                head, _, body = data.partition(b"\n")
+                if head.decode("ascii", "replace") != "XZN1 " + self._key:
+                    continue
+                files = [p for p in json.loads(body.decode("utf-8")) if isinstance(p, str)]
+                with self._lock:
+                    self._pending = (self._pending or []) + files
+                conn.sendall(b"OK")
+            except Exception:
+                _log_swallowed()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def take(self):
+        """Files received since the last call (list), or None."""
+        with self._lock:
+            files, self._pending = self._pending, None
+        return files
+
+
+def send_to_running_instance(files, wait=3.0):
+    """Give the files to the XZN that is already running. True if it
+    took them; False if there is none (then this one starts normally)."""
+    import socket
+    try:
+        with open(_instance_key_path(), "r") as f:
+            key = f.read().strip()
+    except Exception:
+        return False
+    if IS_WINDOWS:
+        try:   # let the running XZN come to the front
+            import ctypes
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+    msg = ("XZN1 " + key + "\n").encode("ascii") + json.dumps(list(files)).encode("utf-8")
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", _instance_port()), timeout=2.0) as c:
+                c.sendall(msg)
+                c.shutdown(socket.SHUT_WR)
+                return c.recv(2) == b"OK"
+        except OSError:
+            # The port is taken but nobody answered yet: the other XZN may
+            # still be starting (several files opened at once).
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.2)
+
+
 class App:
     def __init__(self):
         set_taskbar_app_id()
@@ -6548,7 +6688,7 @@ class App:
     def _mac_open_documents(self, *paths):
         files = [p for p in paths if os.path.isfile(p)]
         if files:
-            self.root.after(100, lambda: self.add_paths(files))
+            self.root.after(100, lambda: self.open_files(files))
 
     def _show_mac_about(self):
         try:
@@ -7141,6 +7281,11 @@ class App:
         self.listbox.pack(side="left", fill="both", expand=True)
         self.pl_scale.pack(side="right", fill="y", padx=(2, 0))
         self.listbox.bind("<Double-Button-1>", lambda e: self._play_selected())
+        # drag rows with the mouse to reorder them
+        self._pl_drag = None
+        self.listbox.bind("<ButtonPress-1>", self._pl_drag_press)
+        self.listbox.bind("<B1-Motion>", self._pl_drag_motion)
+        self.listbox.bind("<ButtonRelease-1>", self._pl_drag_release)
         self.listbox.bind("<Button-3>", self._on_playlist_right_click)
         self.listbox.bind("<Button-2>", self._on_playlist_right_click)
         self.listbox.bind("<Control-Button-1>", self._on_playlist_right_click)
@@ -7200,20 +7345,23 @@ class App:
         except Exception:
             _log_swallowed()
 
-    def _fit_full_window(self, keep_width=False, height=None):
-        """Size the full player to the smallest width where every control
-        still fits (the playlist arrows right next to CLEAR). With the
-        playlist hidden the window is exactly as high as the controls and
-        can only be resized sideways."""
+    def _fit_full_window(self, width=None, height=None):
+        """Size the full player. Without `width` it opens at the smallest
+        width where every control still fits (the playlist arrows right
+        next to CLEAR); with `width` the window keeps exactly that width.
+        With the playlist hidden the window is exactly as high as the
+        controls and can only be resized sideways."""
         try:
             self.root.update_idletasks()
             min_w = self._main_frame.winfo_reqwidth()
+            if width:
+                min_w = min(min_w, width)       # never push the window wider
             req_h = self._main_frame.winfo_reqheight()
             min_h = req_h if self._pl_hidden else max(700, req_h)
             self._full_minsize = (min_w, min_h)
             self.root.minsize(min_w, min_h)
             self.root.resizable(True, not self._pl_hidden)
-            w = max(min_w, self.root.winfo_width()) if keep_width else min_w
+            w = width or min_w
             h = min_h if self._pl_hidden else max(min_h, height or 0)
             self.root.geometry(f"{w}x{h}")
         except Exception:
@@ -7240,14 +7388,18 @@ class App:
     def toggle_playlist(self):
         if self._mini:
             return
-        if not self._pl_hidden:
-            try:
+        # Read the size before the layout changes: the width stays exactly
+        # as the user set it, only the height follows the playlist.
+        try:
+            width = self.root.winfo_width()
+            width = width if width > 50 else None
+            if not self._pl_hidden:
                 self._pl_open_height = self.root.winfo_height()
-            except Exception:
-                self._pl_open_height = None
+        except Exception:
+            width = None
         self._pl_hidden = not self._pl_hidden
         self._apply_playlist_hidden()
-        self._fit_full_window(keep_width=True, height=self._pl_open_height)
+        self._fit_full_window(width=width, height=self._pl_open_height)
         self._persist_settings()
 
     def toggle_mini(self):
@@ -7591,7 +7743,73 @@ class App:
     def move_down(self):
         self._move_block(+1)
 
-    def _move_block(self, direction):
+    # ---- drag & drop inside the playlist --------------------------------
+    # Press on a row and drag it up or down: the row (or all selected rows
+    # together) moves along. Shift / Ctrl (Cmd) clicks select as before.
+
+    def _pl_drag_press(self, event):
+        self._pl_drag = None
+        mods = 0x0001 | 0x0004 | (0x0008 if IS_MAC else 0)   # Shift, Ctrl, Cmd
+        if event.state & mods or not self.playlist:
+            return None
+        row = self.listbox.nearest(event.y)
+        if row < 0 or row >= len(self.playlist):
+            return None
+        sel = self.listbox.curselection()
+        self._pl_drag = {"row": row, "moved": False, "y": event.y,
+                         "keep": row in sel and len(sel) > 1}
+        if self._pl_drag["keep"]:
+            # keep a multi-row selection so the whole block can be dragged;
+            # a click without dragging selects just this row (on release)
+            return "break"
+        return None
+
+    def _pl_drag_motion(self, event):
+        drag = self._pl_drag
+        if drag is None:
+            return None
+        if not drag["moved"] and abs(event.y - drag["y"]) < 4:
+            return "break"
+        drag["moved"] = True
+        try:
+            self.listbox.config(cursor="sb_v_double_arrow")
+            h = self.listbox.winfo_height()
+            if event.y < 0:                       # scroll while dragging
+                self.listbox.yview_scroll(-1, "units")
+            elif event.y > h:
+                self.listbox.yview_scroll(1, "units")
+            target = self.listbox.nearest(event.y)
+            while drag["row"] != target:
+                step = -1 if target < drag["row"] else 1
+                sel = sorted(self.listbox.curselection())
+                if not sel or (step < 0 and sel[0] == 0) or \
+                        (step > 0 and sel[-1] == len(self.playlist) - 1):
+                    break
+                self._move_block(step, persist=False)
+                drag["row"] += step
+        except Exception:
+            _log_swallowed()
+        return "break"
+
+    def _pl_drag_release(self, event):
+        drag, self._pl_drag = self._pl_drag, None
+        if drag is None:
+            return None
+        try:
+            self.listbox.config(cursor="")
+        except Exception:
+            _log_swallowed()
+        if drag["moved"]:
+            self._persist_settings()
+            return "break"
+        if drag["keep"]:
+            # plain click on a row of a multi-selection: select only it
+            self.listbox.selection_clear(0, "end")
+            self.listbox.selection_set(drag["row"])
+            self.listbox.activate(drag["row"])
+        return None
+
+    def _move_block(self, direction, persist=True):
         """
         Move every selected playlist row as a contiguous block by one
         position. `direction` is -1 for up and +1 for down.
@@ -7633,10 +7851,13 @@ class App:
         if self.current_index in sel:
             self.current_index += direction
 
-        # Rebuild the listbox, restoring the (shifted) selection.
-        self.listbox.delete(0, "end")
-        for p in self.playlist:
-            self.listbox.insert("end", self._format_pl_line(p))
+        # Update only the rows that changed (keeps the scroll position, so
+        # dragging rows with the mouse stays smooth), restore the selection.
+        lo = sel[0] + min(direction, 0)
+        hi = sel[-1] + max(direction, 0)
+        for k in range(lo, hi + 1):
+            self.listbox.delete(k)
+            self.listbox.insert(k, self._format_pl_line(self.playlist[k]))
 
         new_sel = [i + direction for i in sel]
         self.listbox.selection_clear(0, "end")
@@ -7648,7 +7869,8 @@ class App:
         except Exception:
             _log_swallowed()
 
-        self._persist_settings()
+        if persist:
+            self._persist_settings()
 
     def _swap_items(self, i, j):
         """(Kept for potential external callers; move_up/down use _move_block.)"""
@@ -8127,7 +8349,9 @@ class App:
                     found.append(p)
         self.add_paths(found)
 
-    def add_paths(self, paths):
+    @staticmethod
+    def _expand_paths(paths):
+        """Media files from the given paths (playlists are read)."""
         expanded = []
         for p in paths:
             ap = os.path.abspath(p)
@@ -8136,13 +8360,78 @@ class App:
                 expanded.extend(entries)
             else:
                 expanded.append(ap)
+        return [p for p in expanded if is_media_file(p) and os.path.isfile(p)]
+
+    def open_files(self, paths):
+        """Files opened from the file manager ("Open with XZN") or passed
+        on the command line: add what is new and play the first one right
+        away. Files already in the playlist are not added twice."""
+        files = self._expand_paths(paths)
+        if not files:
+            return
+        index = {os.path.normcase(p): i for i, p in enumerate(self.playlist)}
+        first = None
+        added = 0
+        for p in files:
+            i = index.get(os.path.normcase(p))
+            if i is None:
+                self.playlist.append(p)
+                self.listbox.insert("end", self._format_pl_line(p))
+                i = index[os.path.normcase(p)] = len(self.playlist) - 1
+                added += 1
+            if first is None:
+                first = i
+        self._update_pl_count()
+        if added:
+            self._persist_settings()
+            self._probe_durations_async(self.playlist)
+        self.play_index(first)
+        try:
+            self.listbox.see(first)
+        except Exception:
+            _log_swallowed()
+
+    def _bring_to_front(self):
+        try:
+            if self.root.state() in ("iconic", "withdrawn"):
+                self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(300, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except Exception:
+            _log_swallowed()
+
+    def attach_instance_server(self, server):
+        """Take files from XZN started a second time (see InstanceServer)."""
+        self._instance_server = server
+        self._last_remote_open = 0.0
+        if server is not None:
+            self.root.after(250, self._poll_instance_server)
+
+    def _poll_instance_server(self):
+        try:
+            files = self._instance_server.take()
+            if files is not None:
+                self._bring_to_front()
+                if files:
+                    now = time.monotonic()
+                    if now - self._last_remote_open < 1.5:
+                        # several files opened at once start one XZN each:
+                        # play the first, just add the rest
+                        self.add_paths(files)
+                    else:
+                        self.open_files(files)
+                    self._last_remote_open = now
+        except Exception:
+            _log_swallowed()
+        self.root.after(250, self._poll_instance_server)
+
+    def add_paths(self, paths):
+        expanded = self._expand_paths(paths)
 
         added = 0
         for p in expanded:
-            if not is_media_file(p):
-                continue
-            if not os.path.isfile(p):
-                continue
             if p not in self.playlist:
                 self.playlist.append(p)
                 self.listbox.insert("end", self._format_pl_line(p))
@@ -8958,6 +9247,14 @@ class App:
 
 
 def main():
+    argv_files = [os.path.abspath(a) for a in sys.argv[1:] if os.path.isfile(a)]
+    # Only one XZN at a time: if one is already running, hand the files
+    # over to it (it plays them and comes to the front) and quit.
+    server = InstanceServer.start()
+    if server is False:
+        if send_to_running_instance(argv_files):
+            return
+        server = None          # port used by something else: run on our own
     setup_logging(_get_app_data_dir())
     print(f"[XZN] Starting {APP_NAME} {VERSION}")
     if LOG_PATH:
@@ -8971,12 +9268,12 @@ def main():
     else:
         print(f"[XZN] Icon: NOT FOUND "
               f"({ICON_FILENAME if IS_WINDOWS else LINUX_ICON_FILENAME} missing)")
+    if server is None:
+        print("[XZN] Single instance not available (port in use)")
     app = App()
-    argv_files = [a for a in sys.argv[1:] if os.path.isfile(a)]
+    app.attach_instance_server(server)
     if argv_files:
-        def _add_cli():
-            app.add_paths(argv_files)
-        app.root.after(260, _add_cli)
+        app.root.after(260, lambda: app.open_files(argv_files))
     app.run()
 
 
