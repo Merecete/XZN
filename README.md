@@ -87,3 +87,8 @@ See [installer/README.md](installer/README.md). One script per platform builds X
 ## License
 
 Released under the BSD 3-Clause License. See [LICENSE.txt](LICENSE.txt) for details.
+
+The ready-made packages also contain third-party libraries (FFmpeg via PyAV, mutagen, NumPy, SciPy,
+Pillow, libsndfile and others), each under its own license. They are listed in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt); the full texts ship in the `licenses` folder of every package
+and are shown in XZN under Info → License.

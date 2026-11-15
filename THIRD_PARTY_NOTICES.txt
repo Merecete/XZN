@@ -1,0 +1,73 @@
+XZN - Third-party software
+==================================================================================
+
+XZN itself is released under the BSD 3-Clause License (see LICENSE.txt).
+
+The ready-to-use XZN packages (Windows installer, macOS app, Linux .deb,
+AppImage and archive) also contain the following open-source components.
+Each one stays under its own license. The full license texts are in the
+"licenses" folder next to the program; the exact versions included in a
+package are listed in licenses/VERSIONS.txt. The source code of every
+component is publicly available at the addresses below.
+
+Because some components are licensed under the GNU GPL (mutagen, and the
+x264 / x265 encoders inside FFmpeg), the XZN packages as a whole are
+distributed under the terms of the GNU GPL version 3 (or later); XZN's own
+code remains available under the BSD 3-Clause License. The complete
+source code of XZN is available at https://github.com/Merecete/XZN; the
+source of each component is available from the addresses listed here, and
+on request from the XZN author for at least three years after a release.
+
+--------------------------------------------------------------------------
+Component              License                      Source
+--------------------------------------------------------------------------
+Python                 PSF License                  https://www.python.org
+Tcl/Tk                 Tcl/Tk License (BSD-style)   https://www.tcl.tk
+PyAV                   BSD-3-Clause                 https://github.com/PyAV-Org/PyAV
+FFmpeg (in PyAV)       LGPL-3.0-or-later            https://ffmpeg.org
+                       built by https://github.com/PyAV-Org/pyav-ffmpeg with:
+  x264, x265           GPL-2.0-or-later             https://www.videolan.org
+  LAME (MP3)           LGPL-2.0-or-later            https://lame.sourceforge.io
+  Opus                 BSD-3-Clause                 https://opus-codec.org
+  libvpx, libwebp      BSD-3-Clause                 https://chromium.googlesource.com/webm
+  dav1d                BSD-2-Clause                 https://code.videolan.org/videolan/dav1d
+  SVT-AV1              BSD-3-Clause-Clear           https://gitlab.com/AOMediaCodec/SVT-AV1
+  libvmaf              BSD-2-Clause-Patent          https://github.com/Netflix/vmaf
+  libass, FriBidi,     ISC, LGPL-2.1-or-later,      https://github.com/libass/libass
+  HarfBuzz, FreeType   MIT, FreeType License
+  GnuTLS (Linux only)  LGPL-2.1-or-later            https://gnutls.org
+  zlib                 Zlib                         https://zlib.net
+NumPy                  BSD-3-Clause (+ bundled      https://numpy.org
+                       OpenBLAS: BSD-3-Clause,
+                       GCC runtime: GPL-3.0 with
+                       GCC Runtime Library Exception)
+SciPy                  BSD-3-Clause (same bundled   https://scipy.org
+                       libraries as NumPy)
+Pillow                 MIT-CMU (+ libjpeg-turbo,    https://python-pillow.org
+                       libpng, zlib, FreeType,
+                       libtiff, libwebp, OpenJPEG,
+                       Little CMS: permissive)
+sounddevice            MIT                          https://github.com/spatialaudio/python-sounddevice
+PortAudio              MIT                          https://www.portaudio.com
+soundfile              BSD-3-Clause                 https://github.com/bastibe/python-soundfile
+libsndfile             LGPL-2.1-or-later            https://libsndfile.github.io/libsndfile
+  libogg, libvorbis,   BSD-3-Clause                 https://xiph.org
+  FLAC, Opus
+  mpg123               LGPL-2.1-or-later            https://www.mpg123.de
+  LAME                 LGPL-2.0-or-later            https://lame.sourceforge.io
+CFFI                   MIT-0                        https://cffi.readthedocs.io
+mutagen                GPL-2.0-or-later             https://github.com/quodlibet/mutagen
+tkinterdnd2            MIT                          https://github.com/Eliav2/tkinterdnd2
+tkdnd                  BSD-style (Tcl license)      https://github.com/petasis/tkdnd
+jeepney (Linux only)   MIT                          https://gitlab.com/takluyver/jeepney
+certifi                MPL-2.0                      https://github.com/certifi/python-certifi
+PyInstaller            GPL-2.0 with bootloader      https://pyinstaller.org
+                       exception (no obligations
+                       for the packaged program)
+
+The LGPL libraries (FFmpeg, libsndfile, ...) are included as separate
+shared libraries (.dll / .so / .dylib) in the program folder and can be
+replaced with compatible versions.
+
+Patent note: some codecs (e.g. H.264/H.265 video) may be covered by
+patents in some countries. XZN only uses them to play media files.

@@ -2966,9 +2966,26 @@ class VideoWindow:
 # ------------------------------------------------------------------------
 # License window (full license text)
 # ------------------------------------------------------------------------
+def license_window_text():
+    """XZN's license followed by the third-party notices (if shipped)."""
+    text = LICENSE_TEXT
+    for p in (resource_path(os.path.join("licenses", "THIRD_PARTY_NOTICES.txt")),
+              resource_path("THIRD_PARTY_NOTICES.txt")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                notices = f.read()
+            folder = os.path.dirname(p) if os.path.basename(os.path.dirname(p)) == "licenses" \
+                else os.path.join(os.path.dirname(p), "licenses")
+            return (text + "\n\n" + "=" * 74 + "\n\n" + notices
+                    + f"\nLicense texts: {folder}\n")
+        except OSError:
+            continue
+    return text
+
+
 def show_license_window(parent, palette, app=None):
     """
-    Open a small window showing the full license text.
+    Open a small window showing XZN's license and the third-party notices.
     Read-only, scrollable, matching the app's look.
     Registers itself with the app so the alpha slider affects it too.
     """
@@ -3026,7 +3043,7 @@ def show_license_window(parent, palette, app=None):
     header = tk.Frame(win, bg=p["PANEL"], padx=20, pady=14)
     header.pack(side="top", fill="x")
 
-    tk.Label(header, text="BSD 3-CLAUSE LICENSE",
+    tk.Label(header, text="LICENSES",
              font=("Helvetica", 12, "bold"),
              bg=p["PANEL"], fg=p["ACCENT"]).pack(anchor="w")
 
@@ -3062,7 +3079,7 @@ def show_license_window(parent, palette, app=None):
     sb.pack(side="right", fill="y")
     txt.config(yscrollcommand=sb.set)
 
-    txt.insert("1.0", LICENSE_TEXT)
+    txt.insert("1.0", license_window_text())
     txt.config(state="disabled")
 
     win.bind("<Escape>", lambda e: _close())

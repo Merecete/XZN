@@ -52,6 +52,13 @@ datas = [
     (R("xzn-logo.png"),   "."),
     (R("XZN Intro.mp3"), "."),
 ]
+
+# --- Licenses ---------------------------------------------------------
+# Notices + full license texts of every bundled library, in the versions
+# this build uses (see installer/collect_licenses.py) -> "licenses" folder
+sys.path.insert(0, R("installer"))
+from collect_licenses import collect as _collect_licenses
+datas.append((_collect_licenses(R("build", "licenses")), "licenses"))
 binaries = []
 # certifi: CA certificates for the HTTPS MusicBrainz lookup (audio CDs)
 hiddenimports = ["certifi", "soundfile", "_soundfile"]

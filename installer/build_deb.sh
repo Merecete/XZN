@@ -32,7 +32,11 @@ make_deb() {
     cp -r "$SRC/." "$PKG/opt/$PKGNAME/"
     ln -s "/opt/$PKGNAME/$EXE" "$PKG/usr/bin/$PKGNAME"
     cp "$ROOT/xzn.png" "$PKG/usr/share/pixmaps/$PKGNAME.png"
-    cp "$ROOT/LICENSE.txt" "$PKG/usr/share/doc/$PKGNAME/copyright"
+    cat "$ROOT/LICENSE.txt" - "$ROOT/THIRD_PARTY_NOTICES.txt" > "$PKG/usr/share/doc/$PKGNAME/copyright" <<'SEP'
+
+==========================================================================
+
+SEP
 
     {
         echo "[Desktop Entry]"
