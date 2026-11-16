@@ -77,6 +77,11 @@ check(app.root.geometry.call_args.args == ("640x160",), f"mini size = layout req
 app.toggle_mini(); check(not app._mini, "mini off")
 check(app.root.geometry.call_args.args == ("760x780+10+10",), f"full size restored {app.root.geometry.call_args}")
 
+# no empty window flashing up at start: hidden while building, then shown once
+_names = [c[0] for c in app.root.method_calls if c[0] in ("withdraw", "deiconify", "iconbitmap", "geometry")]
+check(_names[:1] == ["withdraw"] and "deiconify" in _names and _names.index("deiconify") > _names.index("geometry"),
+      f"window hidden while it is built, shown at its final size {_names[:6]}")
+
 # full window: opens at the smallest width where all controls fit
 app._main_frame.winfo_reqwidth.return_value = 540
 app._main_frame.winfo_reqheight.return_value = 600

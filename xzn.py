@@ -6314,6 +6314,12 @@ class App:
             if not _DND_AVAILABLE:
                 print("[XZN] Drag & Drop disabled (pip install tkinterdnd2)")
 
+        # Keep the window hidden while it is being built. Otherwise it can
+        # flash up empty at Tk's default size (a small square) - on Windows
+        # setting the icon alone makes it appear. Shown at the end of
+        # __init__, already at its final size.
+        self.root.withdraw()
+
         apply_window_icon(self.root)
         self._setup_macos_menu()
 
@@ -6526,6 +6532,13 @@ class App:
 
         self.root.after(80, self._initial_bg)
         self.root.after(500, self._start_media_keys)
+
+        # Everything is in place: show the finished window.
+        try:
+            self.root.update_idletasks()
+            self.root.deiconify()
+        except Exception:
+            _log_swallowed()
 
     # --- Playlist row formatting ----------------------------------------
     def _get_max_pl_chars(self):
