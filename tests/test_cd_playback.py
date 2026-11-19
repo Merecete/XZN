@@ -70,10 +70,40 @@ with mock.patch.object(xzn, "list_cd_drives", return_value=[drv]), mock.patch.ob
     check(cw.toc is not None and sorted(cw.toc["offsets"]) == [1, 2], "CD window reads the disc")
     cw.info = {"artist": "Band", "album": "LP", "tracks": {1: {"title": "One", "artist": "Band"}, 2: {"title": "Two", "artist": "Band"}}}
     cw.listbox.curselection.return_value = (1,)
-    with mock.patch.object(app, "play_index") as pi:
+    before = list(app.playlist)
+    with mock.patch.object(app.player, "open_file") as of:
         cw.play()
-        check(app.playlist[-2:] == [p1, p2] and app._display_names[p2] == "Band - Two"
-              and pi.call_args.args == (app.playlist.index(p2),), "PLAY adds the CD to the playlist and starts at the selected track")
+        check(app.playlist == before and not any(xzn.is_cdda(p) for p in app.playlist),
+              "PLAY leaves the playlist alone (no dead CD entries after ejecting)")
+        check(app._cd_queue == [p1, p2] and app._cd_pos == 1 and of.call_args.args[0] == p2
+              and app._display_names[p2] == "Band - Two", "PLAY starts the CD at the selected track")
+        check(app._marquee_text().startswith("[CD 2/2]"), f"title shows the CD position: {app._marquee_text()}")
+        app.repeat_mode = 0; app.shuffle = False
+        app.player.position = lambda: 0.0
+        app.prev_track()
+        check(app._cd_pos == 0 and of.call_args.args[0] == p1, "previous goes through the CD tracks")
+        app.next_track()
+        check(app._cd_pos == 1 and of.call_args.args[0] == p2, "next goes through the CD tracks")
+        check(app._provide_next() is None, "no gapless hand-over past the last CD track")
+        app._cd_pos = 0
+        check(app._provide_next() == p2, "gapless hand-over to the next CD track")
+        app._on_advanced(p2)
+        check(app._cd_pos == 1 and app.current_index == -1, "hand-over moves along the CD, playlist untouched")
+        app._on_ended()
+        check(app.status_left.config.call_args.kwargs.get("text") == "End of CD.", "end of the disc is reported")
+        check(app._resume_state() is None, "a CD is not saved as resume point")
+        app.repeat_mode = 2
+        app._on_ended()
+        check(app._cd_pos == 0, "repeat all starts the CD again")
+        app.repeat_mode = 0
+        app._cd_queue_saved = app._cd_queue
+    app.playlist[:] = before + ["/music/song.mp3"]
+    with mock.patch.object(app.player, "open_file"):
+        app.play_index(len(app.playlist) - 1)
+        check(app._cd_queue is None and app.current_index == len(app.playlist) - 1,
+              "playing from the playlist ends CD mode")
+    app.playlist[:] = before
+    app._cd_queue = app._cd_queue_saved
     app.player.state = "playing"; app.player.current_path = p2
     with mock.patch.object(app, "stop_play") as sp:
         app.stop_cd_playback(drv)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xenon-Zones (XZN) v1.1.4
+Xenon-Zones (XZN) v1.1.5
 ========================
 A lightweight media player in classic Winamp style.
 
@@ -228,7 +228,7 @@ threading.Thread(target=_load_scipy, name="xzn-scipy", daemon=True).start()
 
 
 APP_NAME = "Xenon-Zones"
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 SAMPLE_RATE = 44100
 VIDEO_W, VIDEO_H = 624, 351
 ANALYZER_BARS = 32
@@ -620,6 +620,8 @@ def load_settings():
         "replaygain": True,
         "viz_style": 0,
         "playlist_hidden": False,
+        "volume": 85,
+        "balance": 50,
         "resume": None,
         "cd": {},
     }
@@ -669,6 +671,10 @@ def load_settings():
             ph = data.get("playlist_hidden")
             if isinstance(ph, bool):
                 defaults["playlist_hidden"] = ph
+            for key in ("volume", "balance"):
+                v = data.get(key)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    defaults[key] = int(max(0, min(100, round(v))))
             cd = data.get("cd")
             if isinstance(cd, dict):
                 defaults["cd"] = cd
@@ -696,6 +702,8 @@ def save_settings(state):
             "replaygain": bool(state.get("replaygain", True)),
             "viz_style": int(state.get("viz_style", 0)),
             "playlist_hidden": bool(state.get("playlist_hidden", False)),
+            "volume": int(state.get("volume", 85)),
+            "balance": int(state.get("balance", 50)),
             "resume": state.get("resume"),
             "cd": dict(state.get("cd") or {}),
         }
@@ -6348,6 +6356,13 @@ class App:
         self._replaygain = bool(settings.get("replaygain", True))
         self._viz_style = int(settings.get("viz_style", 0)) % len(ANALYZER_STYLES)
         self._pl_hidden = bool(settings.get("playlist_hidden", False))
+        # A playing CD has its own track list (not the playlist); None = playlist
+        self._cd_queue = None
+        self._cd_pos = -1
+        # Volume and balance as they were when XZN was closed
+        self._start_volume = int(settings.get("volume", 85))
+        self._start_balance = int(settings.get("balance", 50))
+        self._level_save_job = None
         self._pl_open_height = None      # window height before hiding the playlist
         self._saved_resume = settings.get("resume")
         self._cd_settings = dict(settings.get("cd") or {})
@@ -6745,6 +6760,10 @@ class App:
             "replaygain": bool(getattr(self, "_replaygain", True)),
             "viz_style": int(getattr(self, "_viz_style", 0)),
             "playlist_hidden": bool(getattr(self, "_pl_hidden", False)),
+            "volume": int(round(float(self.vol_scale.get()))) if hasattr(self, "vol_scale")
+                      else getattr(self, "_start_volume", 85),
+            "balance": int(round(float(self.bal_scale.get()))) if hasattr(self, "bal_scale")
+                       else getattr(self, "_start_balance", 50),
             "resume": self._resume_state(),
             "cd": dict(getattr(self, "_cd_settings", {}) or {}),
         })
@@ -6944,6 +6963,8 @@ class App:
             "status_text": self.status_left.cget("text") if hasattr(self, "status_left") else "",
             "alpha": int(self.alpha_scale.get()) if hasattr(self, "alpha_scale") else 100,
         }
+        # the rebuilt sliders start at the current values (no volume jump)
+        self._start_volume, self._start_balance = state_keep["vol"], state_keep["bal"]
 
         if self._main_frame is not None:
             try:
@@ -7246,7 +7267,8 @@ class App:
                                   showvalue=False, command=self._on_vol_cmd, bg=p["PANEL"],
                                   fg=p["ACCENT"], troughcolor=p["SUNKEN"], highlightthickness=0,
                                   sliderrelief="flat")
-        self.vol_scale.set(85)
+        self.vol_scale.set(self._start_volume)
+        self.player.set_volume(self._start_volume / 100.0)
         self.vol_scale.pack(side="left", padx=(4, 10))
         # Mouse-wheel control for Volume (5% steps)
         _bind_scale_wheel(self.vol_scale, self._on_vol_cmd,
@@ -7257,7 +7279,8 @@ class App:
                                   showvalue=False, command=self._on_bal_cmd, bg=p["PANEL"],
                                   fg=p["ACCENT"], troughcolor=p["SUNKEN"], highlightthickness=0,
                                   sliderrelief="flat")
-        self.bal_scale.set(50)
+        self.bal_scale.set(self._start_balance)
+        self.player.set_balance((self._start_balance - 50.0) / 50.0)
         self.bal_scale.pack(side="left", padx=(4, 10))
         # Mouse-wheel control for Balance (5-unit steps)
         _bind_scale_wheel(self.bal_scale, self._on_bal_cmd,
@@ -8277,22 +8300,46 @@ class App:
 
     def play_cd_tracks(self, items):
         """items: [(path, display_name, seconds, is_start)] from the CD
-        window. Adds the CD tracks to the playlist and starts playing."""
-        start_path = None
+        window. Plays the CD from its own track list; nothing is added
+        to the playlist (the tracks would be dead entries once the disc
+        is out). Next / previous / shuffle / repeat work on the CD until
+        something from the playlist is played again."""
+        queue_, start = [], 0
         for path, name, secs, is_start in items:
             self._display_names[path] = name
             if secs > 0:
                 self._track_durations[path] = secs
-            if path not in self.playlist:
-                self.playlist.append(path)
-                self.listbox.insert("end", self._format_pl_line(path))
-            else:
-                self._refresh_line_for(path)
             if is_start:
-                start_path = path
-        self._update_pl_count()
-        if start_path is not None:
-            self.play_index(self.playlist.index(start_path))
+                start = len(queue_)
+            queue_.append(path)
+        if not queue_:
+            return
+        self._cd_queue = queue_
+        self.current_index = -1               # nothing in the playlist is playing
+        self._refresh_selection()
+        self._play_cd_pos(start)
+
+    def _play_cd_pos(self, i):
+        if self._cd_queue is None or not (0 <= i < len(self._cd_queue)):
+            return
+        self._cd_pos = i
+        self._resume_pos = 0.0
+        path = self._cd_queue[i]
+        self.player.open_file(path)
+        self.status_left.config(text=f"Opening {self._display_names.get(path, 'CD track')} …",
+                                fg=self.palette["GRAY"])
+
+    def _active(self):
+        """(tracks, index) being played: the CD's track list or the playlist."""
+        if self._cd_queue is not None:
+            return self._cd_queue, self._cd_pos
+        return self.playlist, self.current_index
+
+    def _play_at(self, i):
+        if self._cd_queue is not None:
+            self._play_cd_pos(i)
+        else:
+            self.play_index(i)
 
     def stop_cd_playback(self, drive):
         """Stop playback if it is reading from the given CD drive."""
@@ -8478,6 +8525,7 @@ class App:
     def play_index(self, i, start_pos=0.0):
         if not (0 <= i < len(self.playlist)):
             return
+        self._cd_queue = None                 # back from the CD to the playlist
         self.current_index = i
         self._resume_pos = 0.0
         path = self.playlist[i]
@@ -8585,6 +8633,8 @@ class App:
             p.pause()
         elif p.state == "paused":
             p.resume()
+        elif self._cd_queue is not None:
+            self._play_cd_pos(self._cd_pos)
         elif 0 <= self.current_index < len(self.playlist):
             self.play_index(self.current_index, self._resume_pos)
 
@@ -8609,33 +8659,40 @@ class App:
         switch is reported back through the "advanced" event.
         """
         try:
-            if not self.playlist:
+            tracks, cur = self._active()
+            if not tracks:
                 return None
-            if self.repeat_mode == 1 and 0 <= self.current_index < len(self.playlist):
-                i = self.current_index
+            if self.repeat_mode == 1 and 0 <= cur < len(tracks):
+                i = cur
             else:
-                i = self._next_index()
-            if i is None or not (0 <= i < len(self.playlist)):
+                i = self._step_index(len(tracks), cur, 1)
+            if i is None or not (0 <= i < len(tracks)):
                 self._queued_next = None
                 return None
             self._queued_next = i
-            return self.playlist[i]
+            return tracks[i]
         except Exception as e:
             print(f"[XZN] _provide_next failed: {e}")
             return None
 
     def _on_advanced(self, path):
         """The player moved on to the next track without a gap."""
+        tracks, _cur = self._active()
         i = self._queued_next
-        if not (i is not None and 0 <= i < len(self.playlist) and self.playlist[i] == path):
-            i = self.playlist.index(path) if path in self.playlist else -1
+        if not (i is not None and 0 <= i < len(tracks) and tracks[i] == path):
+            i = tracks.index(path) if path in tracks else -1
         self._queued_next = None
+        if self._cd_queue is not None:
+            self._cd_pos = i
+            return
         self.current_index = i
         self._refresh_selection()
 
     def _resume_state(self):
         """What to save so the next start can continue here."""
         p = self.player
+        if self._cd_queue is not None or is_cdda(p.current_path or ""):
+            return None                       # a CD may be gone next time
         if p.state in ("playing", "paused") and p.current_path:
             return {"path": p.current_path, "pos": round(float(p.position()), 1)}
         if 0 <= self.current_index < len(self.playlist):
@@ -8665,49 +8722,44 @@ class App:
                 text=f"Press ▶ to continue \"{name}\" at {fmt_time(pos)}.",
                 fg=self.palette["GRAY"])
 
-    def _next_index(self):
-        n = len(self.playlist)
+    def _step_index(self, n, cur, step):
+        """Next (step=1) or previous (step=-1) position in a list of n
+        tracks, following shuffle and repeat-all. None = no more."""
         if n == 0:
             return None
-        if self.current_index < 0:
-            return 0
+        if cur < 0:
+            return 0 if step > 0 else None
         if self.shuffle and n > 1:
             while True:
                 j = random.randrange(n)
-                if j != self.current_index:
+                if j != cur:
                     return j
-        j = self.current_index + 1
-        if j >= n:
-            return 0 if self.repeat_mode == 2 else None
+        j = cur + step
+        if not (0 <= j < n):
+            return (j % n) if self.repeat_mode == 2 else None
         return j
+
+    def _next_index(self):
+        return self._step_index(len(self.playlist), self.current_index, 1)
 
     def _prev_index(self):
-        n = len(self.playlist)
-        if n == 0 or self.current_index < 0:
-            return None
-        if self.shuffle and n > 1:
-            while True:
-                j = random.randrange(n)
-                if j != self.current_index:
-                    return j
-        j = self.current_index - 1
-        if j < 0:
-            return (n - 1) if self.repeat_mode == 2 else None
-        return j
+        return self._step_index(len(self.playlist), self.current_index, -1)
 
     def next_track(self):
-        i = self._next_index()
+        tracks, cur = self._active()
+        i = self._step_index(len(tracks), cur, 1)
         if i is not None:
-            self.play_index(i)
+            self._play_at(i)
 
     def prev_track(self):
         p = self.player
         if p.position() > 4 and p.current_path:
             p.seek(0)
             return
-        i = self._prev_index()
+        tracks, cur = self._active()
+        i = self._step_index(len(tracks), cur, -1)
         if i is not None:
-            self.play_index(i)
+            self._play_at(i)
 
     def seek_by(self, dt):
         p = self.player
@@ -8845,8 +8897,23 @@ class App:
         self._seek_wheel_active = False
         self._seek_wheel_timer = None
 
+    def _save_levels_soon(self):
+        """Remember volume / balance shortly after the slider stops, so
+        they survive even a crash (and dragging doesn't save each step)."""
+        try:
+            if self._level_save_job is not None:
+                self.root.after_cancel(self._level_save_job)
+            self._level_save_job = self.root.after(1000, self._save_levels_now)
+        except Exception:
+            _log_swallowed()
+
+    def _save_levels_now(self):
+        self._level_save_job = None
+        self._persist_settings()
+
     def _on_vol_cmd(self, v):
         self.player.set_volume(float(v) / 100.0)
+        self._save_levels_soon()
         # Keep the big and the mini volume slider showing the same value.
         try:
             iv = int(round(float(v)))
@@ -8863,6 +8930,7 @@ class App:
 
     def _on_bal_cmd(self, v):
         self.player.set_balance((float(v) - 50.0) / 50.0)
+        self._save_levels_soon()
 
     # --- Event loop ------------------------------------------------------
     def _poll_events(self):
@@ -8886,6 +8954,8 @@ class App:
 
     def _marquee_text(self):
         base = self.player.title_text or "XZN — ready"
+        if self._cd_queue is not None:
+            return f"[CD {self._cd_pos + 1}/{len(self._cd_queue)}] {base}"
         if 0 <= self.current_index < len(self.playlist) and len(self.playlist) > 1:
             base = f"[{self.current_index + 1}/{len(self.playlist)}] {base}"
         return base
@@ -8994,14 +9064,16 @@ class App:
                 _log_swallowed()
 
     def _on_ended(self):
-        if self.repeat_mode == 1 and self.current_index >= 0:
-            self.play_index(self.current_index)
+        tracks, cur = self._active()
+        if self.repeat_mode == 1 and cur >= 0:
+            self._play_at(cur)
             return
-        i = self._next_index()
+        i = self._step_index(len(tracks), cur, 1)
         if i is not None:
-            self.play_index(i)
+            self._play_at(i)
         else:
-            self.status_left.config(text="End of playlist.", fg=self.palette["GRAY"])
+            end = "End of CD." if self._cd_queue is not None else "End of playlist."
+            self.status_left.config(text=end, fg=self.palette["GRAY"])
 
     # --- Media keys ------------------------------------------------------
     def _start_media_keys(self):

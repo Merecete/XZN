@@ -82,6 +82,32 @@ _names = [c[0] for c in app.root.method_calls if c[0] in ("withdraw", "deiconify
 check(_names[:1] == ["withdraw"] and "deiconify" in _names and _names.index("deiconify") > _names.index("geometry"),
       f"window hidden while it is built, shown at its final size {_names[:6]}")
 
+# volume and balance are remembered across restarts
+_saved = {}
+app.vol_scale, app.bal_scale = mock.MagicMock(), mock.MagicMock()   # distinct sliders
+app.vol_scale.get.return_value = 37
+app.bal_scale.get.return_value = 62
+app._persist_settings()
+import json as _j
+_data = _j.load(open(xzn.SETTINGS_PATH))
+check(_data["volume"] == 37 and _data["balance"] == 62, "volume and balance are saved")
+with mock.patch.object(xzn.Player, "start"), mock.patch.object(xzn.Player, "set_volume") as _sv, \
+     mock.patch.object(xzn.Player, "set_balance") as _sb:
+    _app2 = xzn.App()
+check(_app2._start_volume == 37 and _app2._start_balance == 62
+      and _sv.call_args_list[0].args == (0.37,) and abs(_sb.call_args_list[0].args[0] - 0.24) < 1e-9,
+      "after a restart the player starts at the saved volume and balance")
+_data["volume"] = "loud"; _data["balance"] = 250
+_j.dump(_data, open(xzn.SETTINGS_PATH, "w"))
+_s = xzn.load_settings()
+check(_s["volume"] == 85 and _s["balance"] == 100, "broken values fall back / are clamped")
+with mock.patch.object(app, "_persist_settings") as _ps:
+    app._level_save_job = None
+    app._on_vol_cmd("50")
+    check(app.root.after.call_args.args[0] == 1000, "moving the slider saves one second later")
+    app._save_levels_now()
+    check(_ps.called, "and then writes the settings")
+
 # full window: opens at the smallest width where all controls fit
 app._main_frame.winfo_reqwidth.return_value = 540
 app._main_frame.winfo_reqheight.return_value = 600
